@@ -29,7 +29,7 @@ class WheelGeometry:
     spread:  float = np.pi / 4  # half-angle of the V opening
 
 
-CONSTRAINT_SETS = ("none", "floor", "wall", "ceiling", "outside")
+CONSTRAINT_SETS = ("none", "floor", "wall", "ceiling", "outside", "thin_edge")
 
 
 # ------------------------------------------------------------------ #
@@ -438,6 +438,35 @@ def _outside_surface_crossing_penalty(
     return penalty
 
 
+def _thin_edge_crossing_penalty(
+    positions: np.ndarray,
+    edge_x: float = 1.0,
+    edge_y: float = 1.5,
+) -> float:
+    """
+    Penalty for any link segment crossing y=edge_y to the left of edge_x.
+
+    The thin horizontal edge extends leftward from its right terminus at
+    (edge_x, edge_y).  The only valid crossing path is around the right
+    side (x >= edge_x), so any segment that crosses y=edge_y at x < edge_x
+    is penalised by the squared x-deficit from the terminus.
+    """
+    penalty = 0.0
+    n = len(positions)
+    for i in range(n - 1):
+        ax, ay = float(positions[i][0]), float(positions[i][1])
+        bx, by = float(positions[i + 1][0]), float(positions[i + 1][1])
+        ay_rel = ay - edge_y
+        by_rel = by - edge_y
+        if ay_rel * by_rel < 0.0:
+            t = ay_rel / (ay_rel - by_rel)
+            x_cross = ax + t * (bx - ax)
+            deficit = edge_x - x_cross
+            if deficit > 0.0:
+                penalty += deficit ** 2
+    return penalty
+
+
 def _ceiling_penalty(
     positions: np.ndarray,
     theta_end: float,
@@ -511,9 +540,9 @@ def total_penalty(
     # General constraints
     pen  = _collision_penalty(positions, theta_end, x1, y1, theta1, wg)
     pen += _no_overlap_penalty(positions, theta_end, x1, y1, theta1, wg)
-    # V-cone penalty is skipped for "outside": the linkage necessarily exits
-    # the apex through the V opening (toward the corner), which is valid.
-    if constraint_set != "outside":
+    # V-cone penalty is skipped for outside/thin_edge: the linkage necessarily
+    # exits the apex through the V opening toward the surface, which is valid.
+    if constraint_set not in ("outside", "thin_edge"):
         pen += _v_cone_entry_penalty(positions, theta_end, theta1, wg)
 
     if constraint_set in ("floor", "wall"):
@@ -528,6 +557,10 @@ def total_penalty(
     if constraint_set == "outside":
         pen += _outside_corner_penalty(positions, wall_x, ceiling_y)
         pen += _outside_surface_crossing_penalty(positions, wall_x, ceiling_y)
+
+    if constraint_set == "thin_edge":
+        # wall_x is repurposed as edge_x (right terminus); ceiling_y as edge_y (edge height).
+        pen += _thin_edge_crossing_penalty(positions, wall_x, ceiling_y)
 
     return weight * pen
 
@@ -595,21 +628,40 @@ def _outside_contact_adjust(
     """
     Surface-contact adjustment for the "outside" corner geometry.
 
-    The assembly is on the EXTERIOR of the wall/ceiling corner:
-      wheels primarily downward (sin(c) < 0) → resting ON TOP of ceiling
-                                                y set so lowest wheel at ceiling_y + wheel_r
-      wheels primarily rightward (cos(c) > 0) → pressing against exterior wall face
-                                                x set so rightmost wheel at wall_x - wheel_r
+    Smoothly blends between ceiling-top and wall modes to avoid the
+    position snap that the old hard |sin_c|/|cos_c| threshold produced
+    at theta=pi/4 (the dead zone).
+
+      theta <= 0  : pure ceiling-top — y = ceiling_y + floor_y_for_assembly
+      theta >= pi/2: pure wall       — x = wall_x_exterior, y capped at ceiling_y
+      0 < theta < pi/2: smoothstep blend between the two modes
     """
     c = theta - np.pi / 2
-    cos_c = np.cos(c)
-    sin_c = np.sin(c)
+    cos_c = np.cos(c)   # = sin(theta)
+    sin_c = np.sin(c)   # = -cos(theta)
 
-    if abs(sin_c) > abs(cos_c) and sin_c < 0:   # wheels face DOWN → on top of ceiling
+    if sin_c < 0 and cos_c <= 0:
+        # Pure ceiling-top (theta <= 0): wheels face downward, no rightward component.
         y = ceiling_y + floor_y_for_assembly(theta, wg)
 
-    if abs(cos_c) > abs(sin_c) and cos_c > 0:   # wheels face RIGHT → exterior wall face
+    elif cos_c > 0 and sin_c >= 0:
+        # Pure wall (theta >= pi/2): wheels face rightward, no downward component.
         x = wall_x_exterior_for_assembly(theta, wg, wall_x)
+        y = min(y, ceiling_y)
+
+    elif sin_c < 0 and cos_c > 0:
+        # Blend zone (0 < theta < pi/2): wall_weight goes 0→1 via smoothstep.
+        abs_sin = -sin_c    # > 0 here
+        abs_cos = cos_c     # > 0 here
+        w = abs_cos / (abs_sin + abs_cos)
+        wall_weight = w * w * (3.0 - 2.0 * w)
+
+        y_ceil = ceiling_y + floor_y_for_assembly(theta, wg)
+        x_wall = wall_x_exterior_for_assembly(theta, wg, wall_x)
+        y_fall = min(y, ceiling_y)
+
+        x = x + wall_weight * (x_wall - x)
+        y = y_ceil * (1.0 - wall_weight) + y_fall * wall_weight
 
     return x, y
 
@@ -631,4 +683,54 @@ def apply_outside_constraint(
     """
     x1, y1 = _outside_contact_adjust(x1, y1, theta1, wg, wall_x, ceiling_y)
     x2, y2 = _outside_contact_adjust(x2, y2, theta2, wg, wall_x, ceiling_y)
+    return x1, y1, x2, y2
+
+
+def _thin_edge_contact_adjust(
+    x: float, y: float, theta: float,
+    wg: WheelGeometry, edge_y: float = 1.5,
+) -> Tuple[float, float]:
+    """
+    Surface-contact adjustment for the thin-edge constraint.
+
+    The thin edge is a horizontal surface at y=edge_y extending leftward from
+    its right terminus at x=edge_x.  Two orientations are recognised:
+
+      wheels face DOWN  (sin(theta-π/2) < 0)  →  assembly rests ON TOP of edge
+      wheels face UP    (sin(theta-π/2) > 0)  →  assembly hangs from BELOW edge
+
+    x is not constrained; only y is adjusted.
+    """
+    c = theta - np.pi / 2
+    sin_c = np.sin(c)
+    cos_c = np.cos(c)
+
+    if abs(sin_c) > abs(cos_c):
+        if sin_c < 0:   # wheels face DOWN → on top of edge
+            y = edge_y + floor_y_for_assembly(theta, wg)
+        else:            # wheels face UP → on bottom of edge
+            y = ceiling_y_for_assembly(theta, wg, edge_y)
+
+    return x, y
+
+
+def apply_thin_edge_constraint(
+    x1: float, y1: float, theta1: float,
+    x2: float, y2: float, theta2: float,
+    wg: WheelGeometry,
+    edge_y: float = 1.5,
+) -> Tuple[float, float, float, float]:
+    """
+    Auto-adjust poses for the thin-edge constraint.
+
+    The thin horizontal edge is at y=edge_y.  The linkage wraps around its
+    right terminus; the two assemblies are on opposite faces of the edge.
+
+      wheels face DOWN (sin(theta-π/2) < 0) → on top of edge (y auto-set)
+      wheels face UP   (sin(theta-π/2) > 0) → below edge     (y auto-set)
+
+    x is not modified.  Returns (x1, y1, x2, y2).
+    """
+    x1, y1 = _thin_edge_contact_adjust(x1, y1, theta1, wg, edge_y)
+    x2, y2 = _thin_edge_contact_adjust(x2, y2, theta2, wg, edge_y)
     return x1, y1, x2, y2

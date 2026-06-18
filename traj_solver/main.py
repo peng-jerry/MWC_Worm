@@ -18,12 +18,18 @@ from visualize import plot_robot
 def main():
     # ------------------------------------------------------------------ #
     #  Constraint set — toggle between:                                    #
-    #    "none"  : purely kinematic IK, no physical constraints            #
-    #    "floor" : wheels on floor (y=0); linkage stays above floor        #
-    #    "wall"  : floor at y=0 + vertical wall at x=wall_x;              #
-    #              wheels auto-placed on whichever surface they face       #
+    #    "none"      : purely kinematic IK, no physical constraints        #
+    #    "floor"     : wheels on floor (y=0); linkage stays above floor    #
+    #    "wall"      : floor at y=0 + vertical wall at x=wall_x;          #
+    #                  wheels auto-placed on whichever surface they face   #
+    #    "ceiling"   : ceiling at y=ceiling_y + wall at x=wall_x;         #
+    #                  wheels auto-placed on whichever surface they face   #
+    #    "outside"   : exterior corner wrap; one assembly on ceiling top,  #
+    #                  one on exterior wall face; linkage passes corner    #
+    #    "thin_edge" : one assembly on top of a thin horizontal edge,      #
+    #                  one below; linkage wraps around the right terminus  #
     # ------------------------------------------------------------------ #
-    CONSTRAINT_SET = "outside"
+    CONSTRAINT_SET = "thin_edge"
 
     # ------------------------------------------------------------------ #
     #  Shared parameters                                                   #
@@ -44,28 +50,33 @@ def main():
     #  "ceiling":  x/y overridden based on which surface the wheels face. #
     #    theta=pi      → wheels face up    → ceiling contact (y adjusted) #
     #    theta=-pi/2   → wheels face left  → wall contact   (x adjusted)  #
+    #                                                                      #
+    #  "thin_edge":  y overridden based on which face the wheels contact.  #
+    #    theta=0       → wheels face down  → on top of edge  (y adjusted) #
+    #    theta=pi      → wheels face up    → below edge      (y adjusted) #
+    #    wall_x is the x of the right terminus; ceiling_y is the edge y.  #
     # ------------------------------------------------------------------ #
     if CONSTRAINT_SET == "outside":
         wall_x    = 0.0   # x-coordinate of the vertical wall
         ceiling_y = 3.0   # y-coordinate of the ceiling
 
-        # Front assembly on TOP of ceiling (theta = 0 → V opens downward, wheels press up onto ceiling)
+        # Front assembly on TOP of ceiling (theta=0 → V opens downward, wheels press up onto ceiling)
         # y is overridden so lowest wheel is tangent to ceiling from above; x stays as specified
-        x1, y1, theta1 = 1.5, 0.0, 0.0
+        x1, y1, theta1 = 2.5, 0.0, 0.0
 
-        # Back assembly on exterior face of wall (theta = pi/2 → V opens rightward, wheels press onto wall)
+        # Back assembly on exterior face of wall (theta=pi/2 → V opens rightward, wheels press onto wall)
         # x is overridden so rightmost wheel is tangent to wall from the left; y stays as specified
-        x2, y2, theta2 = 0.0, 1.5, np.pi / 2
+        x2, y2, theta2 = 0.0, 2.0, np.pi / 2
 
     elif CONSTRAINT_SET == "ceiling":
         wall_x    = 0.0   # x-coordinate of the vertical wall
         ceiling_y = 3.0   # y-coordinate of the ceiling
 
-        # Front assembly on the ceiling (theta = pi → V opens upward)
+        # Front assembly on the ceiling (theta=pi → V opens upward)
         # y is overridden to ceiling contact; x stays as specified
         x1, y1, theta1 = 2.5, 0.0, np.pi
 
-        # Back assembly on the wall (theta = -pi/2 → V opens leftward)
+        # Back assembly on the wall (theta=-pi/2 → V opens leftward)
         # x is overridden to wall contact; y stays as specified
         x2, y2, theta2 = 0.0, 1.0, -np.pi / 2
 
@@ -76,13 +87,25 @@ def main():
         # if theta is -np.pi / 2, x is overriden by wall contact, y is kept the same
         x1, y1, theta1 = 0.0, 2.0, -np.pi / 2
 
-        # Back assembly on the floor (theta = 0 → V opens downward)
+        # Back assembly on the floor (theta=0 → V opens downward)
         x2, y2, theta2 = 2.5, 0.0, 0.0
+
+    elif CONSTRAINT_SET == "thin_edge":
+        wall_x    = 1.0   # x-coordinate of the right terminus of the thin edge
+        ceiling_y = 1.5   # y-coordinate of the thin horizontal edge
+
+        # Front assembly on TOP of edge (theta=0 → V opens downward, wheels rest on top surface)
+        # y is overridden so lowest wheel is tangent to top surface; x stays as specified
+        x1, y1, theta1 = -0.5, 0.0, 0.0
+
+        # Back assembly BELOW edge (theta=pi → V opens upward, wheels press onto bottom surface)
+        # y is overridden so highest wheel is tangent to bottom surface; x stays as specified
+        x2, y2, theta2 = 0.5, 0.0, np.pi
 
     else:
         wall_x    = 0.0
         ceiling_y = 3.0
-        #if constraint set = "floor", y is overridden to ensure wheel contact, but x and theta are kept as specified
+        # if constraint set = "floor", y is overridden to ensure wheel contact, but x and theta are kept as specified
         x1, y1, theta1 = 0.0, 0.0, 0.0
         x2, y2, theta2 = 1.5, 1.5, np.radians(45)
 
@@ -95,6 +118,8 @@ def main():
         print(f"  Wall at x = {wall_x}")
     if CONSTRAINT_SET in ("ceiling", "outside"):
         print(f"  Ceiling at y = {ceiling_y}")
+    if CONSTRAINT_SET == "thin_edge":
+        print(f"  Thin edge: y = {ceiling_y},  right terminus x = {wall_x}")
     print(f"  Front hint: ({x1:.3f}, {y1:.3f}), θ₁ = {np.degrees(theta1):.1f}°")
     print(f"  Back  hint: ({x2:.3f}, {y2:.3f}), θ₂ = {np.degrees(theta2):.1f}°")
     print(f"  Links: l1={l1}, l2={l2}, l3={l3}  (total = {l1+l2+l3:.3f})")
@@ -152,6 +177,13 @@ def main():
                 color="slategray", linewidth=2, label=f"Wall (x={wall_x})")
         ax.plot([wall_x, xlim[1]], [ceiling_y, ceiling_y],
                 color="dimgray", linewidth=2, label=f"Ceiling (y={ceiling_y})")
+
+    elif CONSTRAINT_SET == "thin_edge":
+        # Thin edge: horizontal surface extending left from right terminus (wall_x, ceiling_y)
+        ax.plot([xlim[0], wall_x], [ceiling_y, ceiling_y],
+                color="saddlebrown", linewidth=3, label=f"Thin edge (y={ceiling_y})")
+        ax.plot(wall_x, ceiling_y, "D", color="saddlebrown", markersize=8,
+                label=f"Right terminus (x={wall_x})")
 
     ax.set_xlim(xlim)
     ax.set_ylim(ylim)

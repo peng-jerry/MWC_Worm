@@ -21,6 +21,7 @@ from kinematics import forward_kinematics, reachability_check
 from constraints import (WheelGeometry, total_penalty,
                          apply_floor_constraint, apply_wall_constraint,
                          apply_ceiling_constraint, apply_outside_constraint,
+                         apply_thin_edge_constraint,
                          CONSTRAINT_SETS)
 
 
@@ -63,8 +64,18 @@ def _two_link_ik(px, py, l2, l3):
 #  Full chain solver                                                  #
 # ------------------------------------------------------------------ #
 
-def _objective(q, x1, y1, theta1, x2, y2, theta2, l1, l2, l3, wg, constraint_set, wall_x, ceiling_y):
-    """Kinematic residual + constraint penalty (for BFGS polish)."""
+def _smooth_cost(q: np.ndarray, q_ref: np.ndarray, smooth_weight: float) -> float:
+    """Squared angle-wrapped distance from q to q_ref, scaled by smooth_weight."""
+    if smooth_weight == 0.0:
+        return 0.0
+    dq = (q - q_ref + np.pi) % (2 * np.pi) - np.pi
+    return smooth_weight * float(np.dot(dq, dq))
+
+
+def _objective(q, x1, y1, theta1, x2, y2, theta2, l1, l2, l3,
+               wg, constraint_set, wall_x, ceiling_y, q_ref, smooth_weight,
+               pen_weight=1e4):
+    """Kinematic residual + constraint penalty + trajectory smoothness (for BFGS polish)."""
     positions, theta_end = forward_kinematics(q, x1, y1, theta1, l1, l2, l3)
     p3 = positions[-1]
     dx = p3[0] - x2
@@ -72,8 +83,9 @@ def _objective(q, x1, y1, theta1, x2, y2, theta2, l1, l2, l3, wg, constraint_set
     dtheta = np.arctan2(np.sin(theta_end - theta2), np.cos(theta_end - theta2))
     kin = float(dx ** 2 + dy ** 2 + dtheta ** 2)
     pen = total_penalty(q, x1, y1, theta1, x2, y2, theta2, l1, l2, l3,
-                        wg, constraint_set, wall_x=wall_x, ceiling_y=ceiling_y)
-    return kin + pen
+                        wg, constraint_set, wall_x=wall_x, ceiling_y=ceiling_y,
+                        weight=pen_weight)
+    return kin + pen + _smooth_cost(q, q_ref, smooth_weight)
 
 
 def _solve_for_q1(q1, x1, y1, theta1, x2, y2, theta2, l1, l2, l3):
@@ -110,6 +122,7 @@ def solve_ik(
     wall_x: float = 0.0,
     ceiling_y: float = 3.0,
     q_init=None,
+    smooth_weight: float = 0.0,
     n_grid=360,
     tol=1e-7,
 ):
@@ -132,7 +145,12 @@ def solve_ik(
         "floor" auto-adjusts y1/y2 for wheel-ground contact and penalises
         the linkage for going below the floor.
     q_init : array-like of shape (4,), optional
-        Warm-start guess for the joint angles.
+        Warm-start guess for the joint angles.  When provided, the candidate
+        scoring also penalises deviation from this reference by smooth_weight.
+    smooth_weight : float
+        Weight on the trajectory-smoothness term ||q - q_init||² (angle-wrapped).
+        Only applied when q_init is provided.  A value of 1.0 adds a term
+        comparable in scale to the neutral-posture cost ||q||².
     n_grid : int
         Number of q1 values sampled in [-pi, pi] for the global grid sweep.
     tol : float
@@ -164,6 +182,9 @@ def solve_ik(
         x1, y1, x2, y2 = apply_ceiling_constraint(x1, y1, theta1, x2, y2, theta2, wg, wall_x, ceiling_y)
     elif constraint_set == "outside":
         x1, y1, x2, y2 = apply_outside_constraint(x1, y1, theta1, x2, y2, theta2, wg, wall_x, ceiling_y)
+    elif constraint_set == "thin_edge":
+        # ceiling_y is repurposed as edge_y; wall_x as edge_x (right terminus).
+        x1, y1, x2, y2 = apply_thin_edge_constraint(x1, y1, theta1, x2, y2, theta2, wg, ceiling_y)
 
     if not reachability_check(x1, y1, x2, y2, l1, l2, l3):
         dist = np.hypot(x2 - x1, y2 - y1)
@@ -173,19 +194,36 @@ def solve_ik(
         )
 
     kin_args  = (x1, y1, theta1, x2, y2, theta2, l1, l2, l3)
-    full_args = (*kin_args, wg, constraint_set, wall_x, ceiling_y)
+
+    # Smoothness reference: only meaningful when a previous solution is available.
+    q_ref      = np.asarray(q_init, dtype=float) if q_init is not None else np.zeros(4)
+    eff_smooth = smooth_weight if q_init is not None else 0.0
+    full_args  = (*kin_args, wg, constraint_set, wall_x, ceiling_y, q_ref, eff_smooth)
 
     # --- Grid sweep over q1 ---
+    # For the "outside" / "thin_edge" constraints, track the lowest
+    # (penalty + smooth) grid candidate separately and use it directly —
+    # BFGS can drift off the constraint surface in these penalty landscapes.
     candidates = []
+    best_pen_val = np.inf
+    best_pen_q   = None
+
     for q1_val in np.linspace(-np.pi, np.pi, n_grid, endpoint=False):
         for q_vec in _solve_for_q1(q1_val, *kin_args):
-            kin_cost = float(np.dot(q_vec, q_vec))
-            pen_cost = total_penalty(q_vec, *kin_args, wg, constraint_set,
-                                     wall_x=wall_x, ceiling_y=ceiling_y)
-            candidates.append((kin_cost + pen_cost, q_vec))
+            kin_cost    = float(np.dot(q_vec, q_vec))
+            pen_cost    = total_penalty(q_vec, *kin_args, wg, constraint_set,
+                                        wall_x=wall_x, ceiling_y=ceiling_y)
+            smooth_cost = _smooth_cost(q_vec, q_ref, eff_smooth)
+            total_cost  = kin_cost + pen_cost + smooth_cost
+            candidates.append((total_cost, q_vec))
+            if constraint_set in ("outside", "thin_edge"):
+                combined = pen_cost + smooth_cost
+                if combined < best_pen_val:
+                    best_pen_val = combined
+                    best_pen_q   = q_vec.copy()
 
     if q_init is not None:
-        q0 = np.asarray(q_init, dtype=float)
+        q0  = q_ref
         pen = total_penalty(q0, *kin_args, wg, constraint_set,
                             wall_x=wall_x, ceiling_y=ceiling_y)
         candidates.append((float(np.dot(q0, q0)) + pen, q0))
@@ -200,27 +238,40 @@ def solve_ik(
     best_q   = top_seeds[0].copy()
     best_val = np.inf
 
-    if constraint_set == "outside":
-        # The segment-crossing penalty has a zero-gradient minimum at the corner
-        # where finite-difference BFGS loses precision.  Powell (derivative-free)
-        # handles this landscape cleanly and converges to machine-epsilon IK.
-        for q0 in top_seeds[:3]:
-            result = minimize(
-                _objective, q0, args=full_args, method="Powell",
-                options={"xtol": 1e-12, "ftol": 1e-12, "maxiter": 5_000},
-            )
-            if result.fun < best_val:
-                best_val = result.fun
-                best_q   = result.x
+    if constraint_set in ("outside", "thin_edge"):
+        # Grid candidates are analytically exact (zero kinematic residual).
+        # Powell / BFGS can drift off the constraint surface in crossing-penalty
+        # landscapes where local minima exist at non-zero kinematic residual
+        # (e.g. chain routes the wrong way around the corner/terminus).
+        # Use the best-penalty grid candidate directly to guarantee zero residual.
+        best_q = best_pen_q if best_pen_q is not None else top_seeds[0].copy()
+
     else:
+        # Polish with smooth_weight=0 and pen_weight=0 so BFGS minimises only
+        # the kinematic residual.  With pen_weight=1e4 (default), the hard-
+        # penalty gradient dominates at kin_res≈0 (where ∂kin/∂q≈0), causing
+        # BFGS to drift away from analytically-exact grid seeds.
+        polish_args = (*kin_args, wg, constraint_set, wall_x, ceiling_y,
+                       q_ref, 0.0, 0.0)   # smooth_weight=0, pen_weight=0
+        converged = []
         for q0 in top_seeds:
             result = minimize(
-                _objective, q0, args=full_args, method="BFGS",
+                _objective, q0, args=polish_args, method="BFGS",
                 options={"gtol": 1e-14, "maxiter": 5_000},
             )
-            if result.fun < best_val:
-                best_val = result.fun
-                best_q   = result.x
+            q_cand = (result.x + np.pi) % (2 * np.pi) - np.pi
+            # Measure kinematic residual directly (result.fun == kin_res² here).
+            pos_c, th_c = forward_kinematics(q_cand, x1, y1, theta1, l1, l2, l3)
+            pe = float(np.hypot(pos_c[-1][0] - x2, pos_c[-1][1] - y2))
+            ae = float(abs(np.arctan2(np.sin(th_c - theta2), np.cos(th_c - theta2))))
+            if float(np.sqrt(pe**2 + ae**2)) < tol:
+                sel = result.fun + _smooth_cost(q_cand, q_ref, eff_smooth)
+                converged.append((sel, q_cand))
+
+        if converged:
+            converged.sort(key=lambda t: t[0])
+            best_q = converged[0][1]
+        # else: keep top_seeds[0] — the analytically-exact grid seed
 
     best_q = (best_q + np.pi) % (2 * np.pi) - np.pi
 
