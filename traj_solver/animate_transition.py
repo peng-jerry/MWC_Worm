@@ -161,7 +161,7 @@ def _outside_corner_adjust(x, y, theta, wg, wall_x=0.0, ceiling_y=3.0):
 # ------------------------------------------------------------------ #
 
 def solve_trajectory(keyframes, wg, l1, l2, l3, n_frames, n_grid=60,
-                     smooth_weight=1.0):
+                     smooth_weight=1.0, cold_at=None):
     """
     Solve IK at n_frames evenly-spaced parameter values in [0, 1].
 
@@ -169,9 +169,18 @@ def solve_trajectory(keyframes, wg, l1, l2, l3, n_frames, n_grid=60,
     with an additional smooth_weight * ||q - q_prev||² term so the solver
     prefers configurations close to the previous frame's solution.
     Returns a list of (q, info, params) tuples.
+
+    Parameters
+    ----------
+    cold_at : float or None
+        If provided, resets the warm-start (q_prev=None) the first time the
+        trajectory parameter s reaches or exceeds this value.  Use this to
+        force a branch switch at a known keyframe boundary (e.g. 0.43 for the
+        outside corner when the back assembly completes its rotation to the wall).
     """
     results = []
     q_prev  = None
+    cold_fired = False
 
     for idx, s in enumerate(np.linspace(0, 1, n_frames)):
         p = eval_keyframes(keyframes, s)
@@ -199,21 +208,25 @@ def solve_trajectory(keyframes, wg, l1, l2, l3, n_frames, n_grid=60,
                 p["x2"], p["y2"], p["theta2"], wg,
                 wall_x=p["wall_x"], floor_y=0.0, ceiling_y=p["ceiling_y"])
 
-        elif cs == "outside":
-            # apply_outside_constraint in solve_ik handles surface placement
-            # for all assembly orientations including the corner transition.
-            # _outside_corner_adjust is NOT called here: at intermediate rotation
-            # angles it places the assembly in the solid block (x<0, y>3), which
-            # creates large, unavoidable crossing penalties.  The solver's built-in
-            # apply_outside_constraint positions the assembly at the corner point
-            # (wall_x, ceiling_y) for dead-zone angles — zero crossing penalty.
+        elif cs in ("outside", "outside_exact"):
+            # "outside": apply_outside_constraint in solve_ik handles surface
+            # placement for ceiling-top and wall-exterior orientations.
+            # "outside_exact": exact pivot positions provided in keyframes;
+            # no pre-adjustment needed (solve_ik skips contact adjustment).
             pass
+
+        # Forced cold-start: drop warm-start exactly once when s crosses cold_at.
+        # This allows a deliberate branch switch at a known trajectory boundary
+        # without affecting any other frame.
+        if cold_at is not None and not cold_fired and s >= cold_at:
+            q_prev = None
+            cold_fired = True
 
         try:
             # The outside penalty landscape is complex enough that the default
             # grid rarely finds seeds in the corner-wrapping region.  Use 6x
             # the normal grid density to match main.py's n_grid=360 baseline.
-            ik_grid = n_grid * 6 if cs in ("outside", "thin_edge") else n_grid
+            ik_grid = n_grid * 6 if cs in ("outside", "outside_exact", "thin_edge", "thin_edge_exact") else n_grid
             q, ok, info = solve_ik(
                 p["x1"], p["y1"], p["theta1"],
                 p["x2"], p["y2"], p["theta2"],
@@ -266,7 +279,7 @@ def _draw_surfaces(ax, constraint_set, wall_x, ceiling_y, xlim, ylim):
         ax.plot([wall_x, xlim[1]], [ceiling_y, ceiling_y],
                 color="dimgray", lw=2, label=f"Ceiling (y={ceiling_y})")
 
-    elif constraint_set == "outside":
+    elif constraint_set in ("outside", "outside_exact"):
         # Filled interior block so it's clear the robot wraps around the outside.
         block = Rectangle(
             (wall_x, ylim[0]), xlim[1] - wall_x, ceiling_y - ylim[0],
@@ -277,7 +290,7 @@ def _draw_surfaces(ax, constraint_set, wall_x, ceiling_y, xlim, ylim):
         ax.plot([wall_x, wall_x], [ylim[0], ceiling_y],
                 color="slategray", lw=2, label=f"Wall exterior (x={wall_x})")
 
-    elif constraint_set == "thin_edge":
+    elif constraint_set in ("thin_edge", "thin_edge_exact"):
         ax.plot([xlim[0], wall_x], [ceiling_y, ceiling_y],
                 color="saddlebrown", lw=3, label=f"Thin edge (y={ceiling_y})")
         ax.plot(wall_x, ceiling_y, "D", color="saddlebrown", ms=8,
@@ -441,114 +454,292 @@ if __name__ == "__main__":
     # ---------------------------------------------------------------- #
     #  Scenario 3: ceiling-top -> exterior wall  (outside top-left)    #
     #                                                                  #
-    #  Both assemblies start ON TOP of the ceiling (theta=0, robot     #
-    #  body above y=CEILING_Y) and end on the exterior face of the     #
-    #  left wall (theta=pi/2, robot body left of x=WALL_X).           #
+    #  Each assembly goes through two pivot phases at the corner:      #
+    #    Phase A — back-wheel pivot: rotate about the back (right)     #
+    #              wheel, which stays fixed on the ceiling top.        #
+    #    Phase B — front-wheel pivot: once the front (left) wheel      #
+    #              touches the exterior wall face, it becomes the new  #
+    #              pivot until the back wheel is directly above it.    #
     #                                                                  #
-    #  _outside_corner_adjust is only applied when the hint is within  #
-    #  0.05 m of (WALL_X, CEILING_Y); away from the corner the        #
-    #  standard apply_outside_constraint handles surface placement.    #
-    #                                                                  #
-    #  When the two assemblies are on opposite sides of the corner,    #
-    #  _outside_surface_crossing_penalty in constraints.py drives the  #
-    #  linkage through the corner point (WALL_X, CEILING_Y).          #
+    #  constraint_set="outside_exact" is used during phase B (and the  #
+    #  brief post-rotation frame where y > CEILING_Y) so that the      #
+    #  exact pivot-computed positions are used without being overridden #
+    #  by the ceiling-contact formula.  Outside penalties still apply. #
     # ---------------------------------------------------------------- #
+
+    # --- Corner geometry constants ---
+    _R    = wg.wheel_r    # 0.12
+    _BAR  = wg.bar_len    # 0.25
+    # Corner point (top-left exterior corner).
+    _CX   = WALL_X        # 0.0
+    _CY   = CEILING_Y     # 3.0
+    # Assembly stops when back-wheel CENTER is directly above the corner:
+    #   back-wheel center = (WALL_X, CEILING_Y + R) = (0, 3.12)
+    #   assembly center   = (WALL_X - BAR·cos(-π/4), CEILING_Y + R - BAR·sin(-π/4))
+    _XSTP = _CX - _BAR * np.cos(-np.pi / 4)            # -0.177
+    _Y0   = _CY + _R - _BAR * np.sin(-np.pi / 4)       # 3.297
+
+    def _cp(phi):
+        """
+        Corner pivot: assembly center and orientation when the back wheel has
+        rolled φ radians (0 → π/2) around the corner.
+
+        The back-wheel center traces a quarter-circle of radius R centered at
+        the corner (CX, CY).  The whole assembly rotates about the corner as a
+        rigid body, so theta = phi.  At phi=0 the assembly is flat on the
+        ceiling; at phi=π/2 both wheels are on the exterior wall face.
+        """
+        bwc_x = _CX - _R * np.sin(phi)
+        bwc_y = _CY + _R * np.cos(phi)
+        x = bwc_x - _BAR * np.cos(phi - np.pi / 4)
+        y = bwc_y - _BAR * np.sin(phi - np.pi / 4)
+        return x, y   # theta = phi
+
+    # Assembly center at end of pivot (phi = π/2):
+    #   back wheel at (-R, CY) = (-0.12, 3.0) — corner of ceiling and wall
+    #   front wheel at (-R, CY - BAR√2·sin(π/4)) = (-0.12, 2.646) — on wall
+    _XW   = _cp(np.pi / 2)[0]   # -0.297
+    _YW   = _cp(np.pi / 2)[1]   # 2.823
+
+    _CS   = "outside"        # normal: ceiling/wall contact auto-set
+    _CSE  = "outside_exact"  # exact positions, outside penalties still on
+
     KEYFRAMES_OUTSIDE = [
-        # Both on ceiling-top. Back (x2) leads — starts 2 m closer to corner.
-        {"t": 0.00, "x1": 4.5, "y1": CEILING_Y, "theta1": 0.0,
-                    "x2": 3.0, "y2": CEILING_Y, "theta2": 0.0,
-                    "constraint_set": "outside", "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-        {"t": 0.20, "x1": 2.5, "y1": CEILING_Y, "theta1": 0.0,
-                    "x2": 0.5, "y2": CEILING_Y, "theta2": 0.0,
-                    "constraint_set": "outside", "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-        # Back slides to corner — theta2 stays 0.
-        {"t": 0.28, "x1": 2.0, "y1": CEILING_Y, "theta1": 0.0,
-                    "x2": 0.0, "y2": CEILING_Y, "theta2": 0.0,
-                    "constraint_set": "outside", "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-        # Back rotation first half (0 -> pi/4): still in ceiling-top contact.
-        # At theta2=pi/4 the ceiling-top mode ends; y2 is still at CEILING_Y.
-        {"t": 0.33, "x1": 1.75, "y1": CEILING_Y, "theta1": 0.0,
-                    "x2": 0.0,  "y2": CEILING_Y, "theta2": np.pi / 4,
-                    "constraint_set": "outside", "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-        # Back rotation second half (pi/4 -> pi/2): wall mode, no ceiling support.
-        # Gravity pulls the assembly 0.3 m down during this ~0.22 s window.
-        {"t": 0.38, "x1": 1.5, "y1": CEILING_Y, "theta1": 0.0,
-                    "x2": 0.0, "y2": CEILING_Y - 0.3, "theta2": np.pi / 2,
-                    "constraint_set": "outside", "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-        # Back descends quickly through the wheel-blocking zone (y in [1.99, 2.91]);
-        # front slides toward the corner to keep the chain taut.
-        {"t": 0.55, "x1": 0.8, "y1": CEILING_Y, "theta1": 0.0,
-                    "x2": 0.0, "y2": 1.5, "theta2": np.pi / 2,
-                    "constraint_set": "outside", "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-        # Front slides to corner — theta1 stays 0.
-        {"t": 0.65, "x1": 0.0, "y1": CEILING_Y, "theta1": 0.0,
-                    "x2": 0.0, "y2": 0.8, "theta2": np.pi / 2,
-                    "constraint_set": "outside", "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-        # Front rotation first half (0 -> pi/4): ceiling-top contact, y unchanged.
-        {"t": 0.70, "x1": 0.0, "y1": CEILING_Y, "theta1": np.pi / 4,
-                    "x2": 0.0, "y2": 0.65, "theta2": np.pi / 2,
-                    "constraint_set": "outside", "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-        # Front rotation second half (pi/4 -> pi/2): wall mode, gravity pulls down 0.3 m.
-        {"t": 0.75, "x1": 0.0, "y1": CEILING_Y - 0.3, "theta1": np.pi / 2,
-                    "x2": 0.0, "y2": 0.5, "theta2": np.pi / 2,
-                    "constraint_set": "outside", "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-        # Both on exterior wall, descending.
-        {"t": 1.00, "x1": 0.0, "y1": 2.3, "theta1": np.pi / 2,
-                    "x2": 0.0, "y2": 0.3, "theta2": np.pi / 2,
-                    "constraint_set": "outside", "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+        # Phase 0 — both approach on ceiling (theta=0), moving left.
+        {"t": 0.00, "x1":  2.0,         "y1": _Y0, "theta1": 0.0,
+                    "x2":  3.5,         "y2": _Y0, "theta2": 0.0,
+                    "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+
+        # Phase 1 — front assembly stops when back-wheel CENTER is directly
+        # above the corner (x_bwc = WALL_X = 0, one wheel-radius further left
+        # than the old tangent-at-wall stop).  Switch to outside_exact: at
+        # x<0, y>ceiling_y the contact formula applies a spurious x-clamp.
+        {"t": 0.24, "x1": _XSTP,        "y1": _Y0, "theta1": 0.0,
+                    "x2": _XSTP + 1.5,  "y2": _Y0, "theta2": 0.0,
+                    "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+
+        # Phase 2 — front corner pivot (phi: 0 → π/2).
+        # The back wheel rolls around the corner on an arc of radius R; the
+        # whole assembly rotates about the corner point (CX, CY).  Use π/8
+        # steps so no frame exceeds ~10° of joint-angle change.
+        {"t": 0.29, "x1": _cp(np.pi / 8)[0], "y1": _cp(np.pi / 8)[1],
+                    "theta1": np.pi / 8,
+                    "x2": _XSTP + 1.5,  "y2": _Y0, "theta2": 0.0,
+                    "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+        {"t": 0.34, "x1": _cp(np.pi / 4)[0], "y1": _cp(np.pi / 4)[1],
+                    "theta1": np.pi / 4,
+                    "x2": _XSTP + 1.5,  "y2": _Y0, "theta2": 0.0,
+                    "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+        {"t": 0.39, "x1": _cp(3 * np.pi / 8)[0], "y1": _cp(3 * np.pi / 8)[1],
+                    "theta1": 3 * np.pi / 8,
+                    "x2": _XSTP + 1.5,  "y2": _Y0, "theta2": 0.0,
+                    "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+        # Phase 2 done — front at theta=π/2; back wheel at corner (-R, CY),
+        # front wheel on wall at (-R, 2.646).
+        {"t": 0.44, "x1": _XW,           "y1": _YW, "theta1": np.pi / 2,
+                    "x2": _XSTP + 1.5,  "y2": _Y0, "theta2": 0.0,
+                    "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+
+        # Phase 3 — joint forward drive: front descends wall while back rolls
+        # toward the corner stop.  Use fine steps as x2 crosses zero — the chain
+        # routing transitions there and coarse steps cause IK branch switches.
+        {"t": 0.48, "x1": _XW, "y1": 2.7, "theta1": np.pi / 2,
+                    "x2": 1.0,            "y2": _Y0, "theta2": 0.0,
+                    "constraint_set": _CS, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+        {"t": 0.52, "x1": _XW, "y1": 2.5, "theta1": np.pi / 2,
+                    "x2": 0.6,            "y2": _Y0, "theta2": 0.0,
+                    "constraint_set": _CS, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+        {"t": 0.56, "x1": _XW, "y1": 2.35,"theta1": np.pi / 2,
+                    "x2": 0.2,            "y2": _Y0, "theta2": 0.0,
+                    "constraint_set": _CS, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+        # x2 approaching zero — switch to exact, then step past zero slowly.
+        {"t": 0.59, "x1": _XW, "y1": 2.25,"theta1": np.pi / 2,
+                    "x2": 0.05,           "y2": _Y0, "theta2": 0.0,
+                    "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+        {"t": 0.61, "x1": _XW, "y1": 2.2, "theta1": np.pi / 2,
+                    "x2": -0.05,          "y2": _Y0, "theta2": 0.0,
+                    "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+        {"t": 0.63, "x1": _XW, "y1": 2.15,"theta1": np.pi / 2,
+                    "x2": -0.12,          "y2": _Y0, "theta2": 0.0,
+                    "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+        # Back arrives at stop; begin back pivot almost immediately so the IK
+        # has two moving assemblies as the front passes through the near-degenerate
+        # zone (y1≈2.0 where P1 crowds P3 and q2–q4 become hyper-sensitive).
+        {"t": 0.66, "x1": _XW, "y1": 2.05,"theta1": np.pi / 2,
+                    "x2": _XSTP,          "y2": _Y0, "theta2": 0.0,
+                    "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+
+        # Phase 4 — back corner pivot (phi: 0 → π/2), identical geometry to phase 2.
+        # Overlap with front descent so the IK landscape evolves smoothly.
+        {"t": 0.70, "x1": _XW, "y1": 1.8, "theta1": np.pi / 2,
+                    "x2": _cp(np.pi / 8)[0], "y2": _cp(np.pi / 8)[1],
+                    "theta2": np.pi / 8,
+                    "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+        {"t": 0.76, "x1": _XW, "y1": 1.4, "theta1": np.pi / 2,
+                    "x2": _cp(np.pi / 4)[0], "y2": _cp(np.pi / 4)[1],
+                    "theta2": np.pi / 4,
+                    "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+        {"t": 0.82, "x1": _XW, "y1": 1.0, "theta1": np.pi / 2,
+                    "x2": _cp(3 * np.pi / 8)[0], "y2": _cp(3 * np.pi / 8)[1],
+                    "theta2": 3 * np.pi / 8,
+                    "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+        # Phase 4 done — back at theta=π/2.
+        {"t": 0.88, "x1": _XW, "y1": 0.8, "theta1": np.pi / 2,
+                    "x2": _XW,              "y2": _YW, "theta2": np.pi / 2,
+                    "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+
+        # Phase 5 — both on exterior wall, descending.
+        {"t": 0.96, "x1": _XW, "y1": 0.5, "theta1": np.pi / 2,
+                    "x2": _XW,  "y2": 2.0, "theta2": np.pi / 2,
+                    "constraint_set": _CS, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+        {"t": 1.00, "x1": _XW, "y1": 0.0, "theta1": np.pi / 2,
+                    "x2": _XW,  "y2": 1.5, "theta2": np.pi / 2,
+                    "constraint_set": _CS, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
     ]
 
     # ---------------------------------------------------------------- #
     #  Scenario 4: top of thin edge -> below thin edge               #
     #                                                                  #
-    #  Both assemblies start ON TOP of a thin horizontal edge          #
-    #  (theta=0, wheels face down) and end BELOW it (theta=pi, wheels  #
-    #  face up), wrapping around the right terminus at (EDGE_X, EDGE_Y)#
+    #  Both assemblies start ON TOP of a thin horizontal edge and end  #
+    #  BELOW it, wrapping clockwise (theta: 0 → −π) around the right  #
+    #  terminus at (EDGE_X, EDGE_Y).                                   #
     #                                                                  #
-    #  Rotation intermediate keyframe at theta=pi/2 forces _lerp_angle #
-    #  through +pi/2 (rightward, around the terminus) rather than the  #
-    #  opposite shortest-arc direction (-pi/2, wrong way).             #
+    #  At theta=0 the assembly moves rightward; the RIGHT wheel leads. #
+    #  Stop: BACK (left/trailing) wheel center directly above terminus.#
+    #  That wheel center then traces a semicircle of radius wheel_r    #
+    #  about the terminus (CW, 180°), with the assembly rotating as a  #
+    #  rigid body about the terminus.  At completion (theta=−π) the    #
+    #  front (right) wheel arrives at the underside exactly as the     #
+    #  back wheel finishes — same timing rule as the outside scenario. #
+    #                                                                  #
+    #  constraint_set="thin_edge_exact" is used during pivot phases.   #
     # ---------------------------------------------------------------- #
+
+    # --- Thin-edge geometry constants ---
+    _R_TE   = wg.wheel_r    # 0.12
+    _BAR_TE = wg.bar_len    # 0.25
+
+    # Stop: back (left at theta=0) wheel center directly above terminus
+    _XSTP_TE = EDGE_X + _BAR_TE / np.sqrt(2.0)            # 1.177
+    _Y0_TE   = EDGE_Y + _R_TE + _BAR_TE / np.sqrt(2.0)    # 1.797
+
+    def _cp_te(phi):
+        """Assembly center during CW semicircle pivot about terminus (phi: 0→π). theta = −phi."""
+        dx0 = +_BAR_TE / np.sqrt(2.0)          # +0.177  (back-wheel x offset from terminus)
+        dy0 = _R_TE + _BAR_TE / np.sqrt(2.0)   # +0.297  (back-wheel y offset from terminus)
+        return (EDGE_X + dx0 * np.cos(phi) + dy0 * np.sin(phi),
+                EDGE_Y - dx0 * np.sin(phi) + dy0 * np.cos(phi))
+
+    # _cp_te key values (phi → (x, y), theta):
+    #   0     → (1.177, 1.797),  0
+    #   π/6   → (1.302, 1.669), −π/6   ← back wheel crosses EDGE_Y (x≈1.30 ≥ EDGE_X ✓)
+    #   π/3   → (1.346, 1.496), −π/3   ← assembly just below EDGE_Y; chain clear
+    #   π/2   → (1.297, 1.323), −π/2
+    #   2π/3  → (1.169, 1.198), −2π/3
+    #   5π/6  → (0.996, 1.154), −5π/6
+    #   π     → (0.823, 1.203), −π    ← both wheels at y=EDGE_Y−R (touching underside)
+    _XW_TE = _cp_te(np.pi)[0]   # 0.823
+    _YW_TE = _cp_te(np.pi)[1]   # 1.203
+
+    _CTE = "thin_edge_exact"
+
+    # _XSTP2_TE: stop for back assembly — front (right) wheel tangent to top of terminus
+    _XSTP2_TE = EDGE_X - _BAR_TE / np.sqrt(2.0)   # 0.823
+
     KEYFRAMES_THIN_EDGE = [
-        # Both on top; front (x1) leads toward terminus.
-        {"t": 0.00, "x1": -0.5, "y1": EDGE_Y, "theta1": 0.0,
-                    "x2": -2.5, "y2": EDGE_Y, "theta2": 0.0,
-                    "constraint_set": "thin_edge", "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-        {"t": 0.22, "x1":  0.5, "y1": EDGE_Y, "theta1": 0.0,
-                    "x2": -0.5, "y2": EDGE_Y, "theta2": 0.0,
-                    "constraint_set": "thin_edge", "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-        # Front slides to right terminus.
-        {"t": 0.30, "x1":  EDGE_X, "y1": EDGE_Y, "theta1": 0.0,
-                    "x2": -0.7, "y2": EDGE_Y, "theta2": 0.0,
-                    "constraint_set": "thin_edge", "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-        # Front rotates at terminus, first half (0 -> -pi/2, CW through left side).
-        {"t": 0.38, "x1":  EDGE_X, "y1": EDGE_Y, "theta1": -np.pi / 2,
-                    "x2": -0.5, "y2": EDGE_Y, "theta2": 0.0,
-                    "constraint_set": "thin_edge", "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-        # Front rotation complete (pi/2 -> pi); now below edge.
-        {"t": 0.46, "x1":  EDGE_X, "y1": EDGE_Y, "theta1": np.pi,
-                    "x2": -0.5, "y2": EDGE_Y, "theta2": 0.0,
-                    "constraint_set": "thin_edge", "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-        # Front slides left under edge; back approaches terminus.
-        {"t": 0.60, "x1": -0.2, "y1": EDGE_Y, "theta1": np.pi,
-                    "x2":  0.5, "y2": EDGE_Y, "theta2": 0.0,
-                    "constraint_set": "thin_edge", "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-        # Back slides to right terminus.
-        {"t": 0.68, "x1": -0.5, "y1": EDGE_Y, "theta1": np.pi,
-                    "x2":  EDGE_X, "y2": EDGE_Y, "theta2": 0.0,
-                    "constraint_set": "thin_edge", "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-        # Back rotates at terminus, first half (0 -> -pi/2, CW).
-        {"t": 0.76, "x1": -0.8, "y1": EDGE_Y, "theta1": np.pi,
-                    "x2":  EDGE_X, "y2": EDGE_Y, "theta2": -np.pi / 2,
-                    "constraint_set": "thin_edge", "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-        # Back rotation complete (pi/2 -> pi); now below edge.
-        {"t": 0.84, "x1": -1.0, "y1": EDGE_Y, "theta1": np.pi,
-                    "x2":  EDGE_X, "y2": EDGE_Y, "theta2": np.pi,
-                    "constraint_set": "thin_edge", "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-        # Both under edge, sliding left.
-        {"t": 1.00, "x1": -1.5, "y1": EDGE_Y, "theta1": np.pi,
-                    "x2": -0.5, "y2": EDGE_Y, "theta2": np.pi,
-                    "constraint_set": "thin_edge", "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
+        # Phase 0 — both approach on edge top (theta=0), moving right.
+        # Maintain ~1.5 m separation; back rolls at constant speed and reaches its
+        # tangent stop (x=0.823) only after the front has rotated 120° (phi=2π/3).
+        {"t": 0.00, "x1": -0.5, "y1": _Y0_TE, "theta1": 0.0,
+                    "x2": -2.0, "y2": _Y0_TE, "theta2": 0.0,
+                    "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
+        # Phase 1 — front stops (back/left wheel above terminus); back still 1.5 m behind.
+        {"t": 0.25, "x1": _XSTP_TE, "y1": _Y0_TE, "theta1": 0.0,
+                    "x2": -0.323,   "y2": _Y0_TE, "theta2": 0.0,
+                    "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
+
+        # Phase 2 — front semicircle pivot (CW: theta1: 0 → −π), 6 steps of 30°.
+        # Back rolls at a uniform speed throughout, arriving at _XSTP2_TE=0.823
+        # (front/right wheel tangent to terminus top) only at phi=2π/3 (t=0.41).
+        # Delaying arrival until phi=2π/3 prevents wheel overlap: at phi=π/3 and π/2
+        # the front assembly's trailing wheel swings near the back assembly's leading
+        # wheel — keeping the back at x≤0.55 through those steps gives ≥0.24 m clearance.
+        # At phi≥2π/3 the straight-line chain crossing falls left of EDGE_X, so the
+        # IK routes the chain in a right-loop over the terminus — forced by the
+        # crossing penalty (weight 1e4) which dwarfs the smooth term.
+        {"t": 0.29, "x1": _cp_te(  np.pi/6)[0], "y1": _cp_te(  np.pi/6)[1],
+                    "theta1": -np.pi / 6,
+                    "x2":  0.00,     "y2": _Y0_TE, "theta2": 0.0,
+                    "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
+        {"t": 0.33, "x1": _cp_te(  np.pi/3)[0], "y1": _cp_te(  np.pi/3)[1],
+                    "theta1": -np.pi / 3,
+                    "x2":  0.27,     "y2": _Y0_TE, "theta2": 0.0,
+                    "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
+        {"t": 0.37, "x1": _cp_te(  np.pi/2)[0], "y1": _cp_te(  np.pi/2)[1],
+                    "theta1": -np.pi / 2,
+                    "x2":  0.55,     "y2": _Y0_TE, "theta2": 0.0,
+                    "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
+        {"t": 0.41, "x1": _cp_te(2*np.pi/3)[0], "y1": _cp_te(2*np.pi/3)[1],
+                    "theta1": -2 * np.pi / 3,
+                    "x2": _XSTP2_TE, "y2": _Y0_TE, "theta2": 0.0,
+                    "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
+        {"t": 0.44, "x1": _cp_te(5*np.pi/6)[0], "y1": _cp_te(5*np.pi/6)[1],
+                    "theta1": -5 * np.pi / 6,
+                    "x2": _XSTP2_TE, "y2": _Y0_TE, "theta2": 0.0,
+                    "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
+        # Front pivot done — back holds at _XSTP2_TE while front drives away.
+        {"t": 0.47, "x1": _XW_TE,   "y1": _YW_TE, "theta1": -np.pi,
+                    "x2": _XSTP2_TE, "y2": _Y0_TE, "theta2": 0.0,
+                    "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
+
+        # Front drives left (away from terminus) while back holds.
+        # Sequential: front clears first, then back rolls off.
+        {"t": 0.54, "x1": 0.5,       "y1": _YW_TE, "theta1": -np.pi,
+                    "x2": _XSTP2_TE, "y2": _Y0_TE, "theta2": 0.0,
+                    "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
+        # Roll-off — back front-wheel rolls past terminus to pivot stop; front holds.
+        {"t": 0.58, "x1": 0.5,       "y1": _YW_TE, "theta1": -np.pi,
+                    "x2": _XSTP_TE,  "y2": _Y0_TE, "theta2": 0.0,
+                    "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
+        # Delay — back holds at pivot start.
+        {"t": 0.62, "x1": 0.5,       "y1": _YW_TE, "theta1": -np.pi,
+                    "x2": _XSTP_TE,  "y2": _Y0_TE, "theta2": 0.0,
+                    "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
+
+        # Phase 3 — back semicircle pivot (CW: theta2: 0 → −π), 6 steps of 30°.
+        # Front retreats at ~5 m/unit throughout (slower than approach speed of 6.7 m/unit).
+        {"t": 0.66, "x1":  0.30, "y1": _YW_TE, "theta1": -np.pi,
+                    "x2": _cp_te(  np.pi/6)[0], "y2": _cp_te(  np.pi/6)[1],
+                    "theta2": -np.pi / 6,
+                    "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
+        {"t": 0.70, "x1":  0.10, "y1": _YW_TE, "theta1": -np.pi,
+                    "x2": _cp_te(  np.pi/3)[0], "y2": _cp_te(  np.pi/3)[1],
+                    "theta2": -np.pi / 3,
+                    "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
+        {"t": 0.74, "x1": -0.10, "y1": _YW_TE, "theta1": -np.pi,
+                    "x2": _cp_te(  np.pi/2)[0], "y2": _cp_te(  np.pi/2)[1],
+                    "theta2": -np.pi / 2,
+                    "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
+        {"t": 0.78, "x1": -0.30, "y1": _YW_TE, "theta1": -np.pi,
+                    "x2": _cp_te(2*np.pi/3)[0], "y2": _cp_te(2*np.pi/3)[1],
+                    "theta2": -2 * np.pi / 3,
+                    "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
+        {"t": 0.82, "x1": -0.50, "y1": _YW_TE, "theta1": -np.pi,
+                    "x2": _cp_te(5*np.pi/6)[0], "y2": _cp_te(5*np.pi/6)[1],
+                    "theta2": -5 * np.pi / 6,
+                    "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
+        # Back pivot done — both at theta=−π below edge.
+        {"t": 0.86, "x1": -0.70, "y1": _YW_TE, "theta1": -np.pi,
+                    "x2": _XW_TE,  "y2": _YW_TE, "theta2": -np.pi,
+                    "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
+
+        # Phase 4 — both below edge, moving left.
+        {"t": 0.93, "x1": -1.05, "y1": _YW_TE, "theta1": -np.pi,
+                    "x2":  0.40,  "y2": _YW_TE, "theta2": -np.pi,
+                    "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
+        {"t": 1.00, "x1": -1.45, "y1": _YW_TE, "theta1": -np.pi,
+                    "x2": -0.20,  "y2": _YW_TE, "theta2": -np.pi,
+                    "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
     ]
 
     if SCENARIO == "floor_to_wall":
@@ -572,19 +763,21 @@ if __name__ == "__main__":
     else:  # "thin_edge"
         keyframes = KEYFRAMES_THIN_EDGE
         xlim = (-3.0, 2.5)
-        ylim = (0.5, 2.5)
+        ylim = (-0.5, 3.5)
         output = "thin_edge.mp4"
         label  = "Thin edge (top -> bottom)"
 
     N_FRAMES       = 90
     FPS            = 15
-    N_GRID         = 60
-    SMOOTH_WEIGHT  = 1.0   # weight on ||q - q_prev||² in candidate scoring
+    N_GRID         = 60    # solve_trajectory already applies ×6 for outside/thin_edge
+    # Higher smooth weight for outside corner: prevents IK branch switches from
+    # outcompeting the continuity cost in the complex exterior-corner penalty landscape.
+    SMOOTH_WEIGHT  = 30.0 if SCENARIO == "thin_edge" else (20.0 if SCENARIO == "outside" else 10.0)
 
     print(f"{label}  ({N_FRAMES} frames @ {FPS} fps)")
     print("-" * 60)
     frames = solve_trajectory(keyframes, wg, l1, l2, l3, N_FRAMES, N_GRID,
-                              smooth_weight=SMOOTH_WEIGHT)
+                              smooth_weight=SMOOTH_WEIGHT, cold_at=None)
     print("-" * 60)
     print("Rendering...")
     render_video(frames, wg, l1, l2, l3, xlim, ylim, output, FPS)

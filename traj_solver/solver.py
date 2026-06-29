@@ -182,9 +182,13 @@ def solve_ik(
         x1, y1, x2, y2 = apply_ceiling_constraint(x1, y1, theta1, x2, y2, theta2, wg, wall_x, ceiling_y)
     elif constraint_set == "outside":
         x1, y1, x2, y2 = apply_outside_constraint(x1, y1, theta1, x2, y2, theta2, wg, wall_x, ceiling_y)
+    elif constraint_set == "outside_exact":
+        pass  # exact pivot positions from keyframes; skip contact adjustment
+    elif constraint_set == "thin_edge_exact":
+        pass  # exact pivot positions from keyframes; skip contact adjustment
     elif constraint_set == "thin_edge":
         # ceiling_y is repurposed as edge_y; wall_x as edge_x (right terminus).
-        x1, y1, x2, y2 = apply_thin_edge_constraint(x1, y1, theta1, x2, y2, theta2, wg, ceiling_y)
+        x1, y1, x2, y2 = apply_thin_edge_constraint(x1, y1, theta1, x2, y2, theta2, wg, ceiling_y, wall_x)
 
     if not reachability_check(x1, y1, x2, y2, l1, l2, l3):
         dist = np.hypot(x2 - x1, y2 - y1)
@@ -216,8 +220,13 @@ def solve_ik(
             smooth_cost = _smooth_cost(q_vec, q_ref, eff_smooth)
             total_cost  = kin_cost + pen_cost + smooth_cost
             candidates.append((total_cost, q_vec))
-            if constraint_set in ("outside", "thin_edge"):
-                combined = pen_cost + smooth_cost
+            if constraint_set in ("outside", "outside_exact", "thin_edge", "thin_edge_exact"):
+                # Tie-break by kin_cost (neutral posture) when penalties are equal.
+                # Weight 0.001 is negligible during warm frames where smooth_cost
+                # dominates, but matters at cold restarts where smooth_cost=0 and
+                # pen≈0 for many candidates — without it, grid order determines the
+                # winner, which can land on a degenerate branch far from neutral.
+                combined = pen_cost + smooth_cost + 0.001 * kin_cost
                 if combined < best_pen_val:
                     best_pen_val = combined
                     best_pen_q   = q_vec.copy()
@@ -238,7 +247,7 @@ def solve_ik(
     best_q   = top_seeds[0].copy()
     best_val = np.inf
 
-    if constraint_set in ("outside", "thin_edge"):
+    if constraint_set in ("outside", "outside_exact", "thin_edge", "thin_edge_exact"):
         # Grid candidates are analytically exact (zero kinematic residual).
         # Powell / BFGS can drift off the constraint surface in crossing-penalty
         # landscapes where local minima exist at non-zero kinematic residual

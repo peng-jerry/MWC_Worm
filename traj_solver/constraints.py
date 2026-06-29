@@ -29,7 +29,7 @@ class WheelGeometry:
     spread:  float = np.pi / 4  # half-angle of the V opening
 
 
-CONSTRAINT_SETS = ("none", "floor", "wall", "ceiling", "outside", "thin_edge")
+CONSTRAINT_SETS = ("none", "floor", "wall", "ceiling", "outside", "outside_exact", "thin_edge", "thin_edge_exact")
 
 
 # ------------------------------------------------------------------ #
@@ -228,11 +228,32 @@ def _v_cone_entry_penalty(
 #  Individual penalty terms                                           #
 # ------------------------------------------------------------------ #
 
+def _joint_sign_penalty(q: np.ndarray, require_negative: bool = True) -> float:
+    """
+    Penalty for q2 or q3 violating their required sign.
+
+    require_negative=True  (wall, ceiling):  penalise qi > 0
+    require_negative=False (outside, thin_edge): penalise qi < 0
+
+    Uses constant-plus-quadratic so even a tiny violation costs 1.0 base
+    (scaled by weight=1e4 in total_penalty → 1e4 per offending joint).
+    This makes the sign boundary a near-hard constraint.
+    """
+    penalty = 0.0
+    for qi in (float(q[1]), float(q[2])):
+        if require_negative and qi > 0.0:
+            penalty += 1.0 + qi * qi
+        elif not require_negative and qi < 0.0:
+            penalty += 1.0 + qi * qi
+    return penalty
+
+
 def _collision_penalty(
     positions: np.ndarray,
     theta_end: float,
     x1: float, y1: float, theta1: float,
     wg: WheelGeometry,
+    bar_cross_weight: float = 1.0,
 ) -> float:
     """
     Penalty for the linkage penetrating any wheel circle or crossing any
@@ -270,7 +291,7 @@ def _collision_penalty(
         # are automatically excluded — no false positives at q1 / q4.
         for bar_root, bar_tip in bars:
             if _segs_cross_interior(a, b, bar_root, bar_tip):
-                penalty += 1.0  # unit penalty per crossing
+                penalty += bar_cross_weight
 
     return penalty
 
@@ -361,29 +382,19 @@ def _outside_corner_penalty(
     ceiling_y: float = 3.0,
 ) -> float:
     """
-    Penalty for intermediate joints P1/P2 entering either forbidden region:
+    Penalty for intermediate joints P1/P2 entering the solid block interior.
 
-      1. Solid corner block  (x < wall_x  AND y > ceiling_y)
-      2. Room interior       (x > wall_x  AND y < ceiling_y)
+    Geometry: solid block occupies x >= wall_x AND y <= ceiling_y (lower-right).
+    The exterior corner space (x < wall_x AND y > ceiling_y) is valid — the
+    chain may route through it when transitioning from ceiling-top to wall.
 
-    Valid regions for an outside-corner wrap are:
-      - Above ceiling (y >= ceiling_y, x >= wall_x): transition from P0
-      - Exterior wrap (x <= wall_x,   y <= ceiling_y): transition to P3
-
-    Physically, the linkage must not cross through the ceiling surface
-    (going from above to below while still right of the wall) nor through
-    the wall surface (going from right to left while below the ceiling).
+    Forbidden region: x > wall_x AND y < ceiling_y (inside the solid block).
     """
     penalty = 0.0
     for pos in positions[1:3]:
         x = float(pos[0])
         y = float(pos[1])
-        # Solid corner block: x < wall_x AND y > ceiling_y
-        x_left  = wall_x - x      # > 0 when left of wall
-        y_above = y - ceiling_y   # > 0 when above ceiling
-        if x_left > 0.0 and y_above > 0.0:
-            penalty += x_left ** 2 + y_above ** 2
-        # Room interior: x > wall_x AND y < ceiling_y
+        # Solid block interior: x > wall_x AND y < ceiling_y
         x_right = x - wall_x      # > 0 when right of wall
         y_below = ceiling_y - y   # > 0 when below ceiling
         if x_right > 0.0 and y_below > 0.0:
@@ -415,26 +426,70 @@ def _outside_surface_crossing_penalty(
         bx, by = float(positions[i + 1][0]), float(positions[i + 1][1])
 
         # Ceiling line crossing: segment straddles y = ceiling_y
-        # Penalise by squared x-distance from the corner.  Minimum = 0 when
-        # the segment passes exactly through (wall_x, ceiling_y).
-        # This fires whether the crossing is right of wall (physical ceiling)
-        # OR left of wall (solid corner extension) — both deviate from the corner.
+        # The physical ceiling surface exists only for x >= wall_x.  Only
+        # penalise when the crossing occurs to the right of (or at) the wall,
+        # i.e. the link actually pierces the ceiling material.  Crossings at
+        # x < wall_x are in the exterior corner space where no ceiling exists —
+        # the corner penalty already guards against solid-block intrusion there.
         ay_rel = ay - ceiling_y
         by_rel = by - ceiling_y
         if ay_rel * by_rel < 0.0:
             t = ay_rel / (ay_rel - by_rel)
             x_cross = ax + t * (bx - ax)
-            penalty += (x_cross - wall_x) ** 2
+            if x_cross >= wall_x:
+                penalty += (x_cross - wall_x) ** 2
 
-        # Wall line crossing: segment straddles x = wall_x
-        # Penalise by squared y-distance from the corner.
-        ax_rel = ax - wall_x
-        bx_rel = bx - wall_x
-        if ax_rel * bx_rel < 0.0:
-            t = ax_rel / (ax_rel - bx_rel)
-            y_cross = ay + t * (by - ay)
-            penalty += (ceiling_y - y_cross) ** 2
+        # Wall line crossing: segment straddles x = wall_x.
+        # Penalise crossings that occur below the ceiling (y ≤ ceiling_y)
+        # by squared distance from the corner (wall_x, ceiling_y).  These
+        # crossings hit the exterior wall face, which is solid material.
+        # Crossings above the ceiling (y > ceiling_y) pass through open
+        # exterior-corner space (no wall material there) — no penalty.
+        #
+        # Exception: skip the P0→P1 segment (i==0).  When the front assembly
+        # is slightly right of wall_x (e.g. still transitioning from ceiling to
+        # wall), the first link of the folded configuration must cross x=wall_x
+        # briefly — this is a geometry artifact of the finite x1 position and
+        # the penalty vanishes naturally as x1 → wall_x.  Penalising it here
+        # would give the wide-elbow branch an unfair advantage and prevent the
+        # branch switch from happening at the right frame.
+        if i > 0:
+            ax_rel = ax - wall_x
+            bx_rel = bx - wall_x
+            if ax_rel * bx_rel < 0.0:
+                t = ax_rel / (ax_rel - bx_rel)
+                y_cross = ay + t * (by - ay)
+                if y_cross <= ceiling_y:  # wall only exists below the ceiling
+                    penalty += (y_cross - ceiling_y) ** 2
 
+    return penalty
+
+
+def _outside_clearance_penalty(
+    positions: np.ndarray,
+    wall_x: float = 0.0,
+    ceiling_y: float = 3.0,
+) -> float:
+    """
+    Soft repulsion keeping P1/P2 away from the two exterior surfaces of the
+    outside corner.
+
+    Two valid exterior regions and their nearby surfaces:
+      - Above ceiling (y > ceiling_y, x > wall_x): push away from y = ceiling_y
+      - Exterior wall (x < wall_x, y < ceiling_y): push away from x = wall_x
+
+    Uses 1/d² with a D_MIN floor so the penalty stays finite at contact.
+    """
+    D_MIN = 0.01
+    penalty = 0.0
+    for pos in positions[1:3]:
+        x, y = float(pos[0]), float(pos[1])
+        if y > ceiling_y and x > wall_x:
+            d = max(y - ceiling_y, D_MIN)
+            penalty += 1.0 / (d * d)
+        if x < wall_x and y < ceiling_y:
+            d = max(wall_x - x, D_MIN)
+            penalty += 1.0 / (d * d)
     return penalty
 
 
@@ -512,6 +567,7 @@ def total_penalty(
     wall_x: float = 0.0,
     ceiling_y: float = 3.0,
     weight: float = 1e4,
+    outside_clearance_weight: float = 2.0,
 ) -> float:
     """
     Weighted constraint penalty for the given joint angles.
@@ -538,11 +594,32 @@ def total_penalty(
     positions, theta_end = forward_kinematics(q, x1, y1, theta1, l1, l2, l3)
 
     # General constraints
-    pen  = _collision_penalty(positions, theta_end, x1, y1, theta1, wg)
+    # For outside/thin_edge the linkage must navigate around the corner and
+    # will naturally brush the wishbone bars; use a softer bar-crossing weight
+    # so smooth continuity is preferred over a large jump to avoid the bar.
+    _bar_w = 0.001 if constraint_set in ("outside", "outside_exact", "thin_edge", "thin_edge_exact") else 1.0
+    pen  = _collision_penalty(positions, theta_end, x1, y1, theta1, wg, _bar_w)
     pen += _no_overlap_penalty(positions, theta_end, x1, y1, theta1, wg)
+    # wall/ceiling: joints must bend inward (q2<0, q3<0)
+    # outside: q2 sign omitted — near the wrap boundary at q2≈±180° the
+    #   wrapped representation flips sign discontinuously, causing false
+    #   rejections.  q3 does NOT flip sign during the outside wrap, so we
+    #   enforce q3 < 0 (elbow-up) separately.
+    # thin_edge: joints must bend outward (q2>0, q3>0) during normal travel
+    #   but the sign flips discontinuously near the 180° wrap; omit for
+    #   thin_edge_exact (pivot phases) to avoid false rejections.
+    if constraint_set in ("wall", "ceiling"):
+        pen += _joint_sign_penalty(q, require_negative=True)
+    elif constraint_set in ("outside", "outside_exact"):
+        q3 = float(q[2])
+        if q3 > 0.0:
+            pen += 1.0 + q3 * q3   # keep q3 ≤ 0 (elbow-up); q2 unconstrained
+    elif constraint_set == "thin_edge":
+        pen += _joint_sign_penalty(q, require_negative=False)
+    # thin_edge_exact: no joint sign penalty (chain flips through ±180° during pivot)
     # V-cone penalty is skipped for outside/thin_edge: the linkage necessarily
     # exits the apex through the V opening toward the surface, which is valid.
-    if constraint_set not in ("outside", "thin_edge"):
+    if constraint_set not in ("outside", "outside_exact", "thin_edge", "thin_edge_exact"):
         pen += _v_cone_entry_penalty(positions, theta_end, theta1, wg)
 
     if constraint_set in ("floor", "wall"):
@@ -554,15 +631,19 @@ def total_penalty(
     if constraint_set == "ceiling":
         pen += _ceiling_penalty(positions, theta_end, x1, y1, theta1, wg, ceiling_y)
 
-    if constraint_set == "outside":
+    if constraint_set in ("outside", "outside_exact"):
         pen += _outside_corner_penalty(positions, wall_x, ceiling_y)
         pen += _outside_surface_crossing_penalty(positions, wall_x, ceiling_y)
 
-    if constraint_set == "thin_edge":
+    if constraint_set in ("thin_edge", "thin_edge_exact"):
         # wall_x is repurposed as edge_x (right terminus); ceiling_y as edge_y (edge height).
         pen += _thin_edge_crossing_penalty(positions, wall_x, ceiling_y)
 
-    return weight * pen
+    result = weight * pen
+    if constraint_set in ("outside", "outside_exact"):
+        result += outside_clearance_weight * _outside_clearance_penalty(
+            positions, wall_x, ceiling_y)
+    return result
 
 
 # ------------------------------------------------------------------ #
@@ -628,40 +709,53 @@ def _outside_contact_adjust(
     """
     Surface-contact adjustment for the "outside" corner geometry.
 
-    Smoothly blends between ceiling-top and wall modes to avoid the
-    position snap that the old hard |sin_c|/|cos_c| threshold produced
-    at theta=pi/4 (the dead zone).
-
-      theta <= 0  : pure ceiling-top — y = ceiling_y + floor_y_for_assembly
-      theta >= pi/2: pure wall       — x = wall_x_exterior, y capped at ceiling_y
-      0 < theta < pi/2: smoothstep blend between the two modes
+    Physical pivot rules — no smoothstep blend:
+      theta <= 0    : ceiling-top, back (right) wheel sets y
+      0 < theta < pi/2:
+        - front (left) wheel not yet at wall → back wheel on ceiling sets y
+        - front wheel has reached wall       → front wheel on wall sets x
+      theta >= pi/2 : wall mode, standard x_exterior formula
     """
-    c = theta - np.pi / 2
-    cos_c = np.cos(c)   # = sin(theta)
-    sin_c = np.sin(c)   # = -cos(theta)
+    c = float(theta) - np.pi / 2
 
-    if sin_c < 0 and cos_c <= 0:
-        # Pure ceiling-top (theta <= 0): wheels face downward, no rightward component.
-        y = ceiling_y + floor_y_for_assembly(theta, wg)
+    dy_R = wg.bar_len * float(np.sin(c + wg.spread))
 
-    elif cos_c > 0 and sin_c >= 0:
-        # Pure wall (theta >= pi/2): wheels face rightward, no downward component.
+    if theta >= np.pi / 2:
+        # Both wheels fully wall-facing: use standard wall-exterior positioning.
         x = wall_x_exterior_for_assembly(theta, wg, wall_x)
         y = min(y, ceiling_y)
+    else:
+        # Ceiling or double-contact pivot: enforce back-wheel ceiling contact on y.
+        # The IK's x is taken as-is — keyframes encode the correct x_dc trajectory
+        # so that when x = x_dc(theta) the front wheel is simultaneously on the wall.
+        y = ceiling_y + wg.wheel_r - dy_R
 
-    elif sin_c < 0 and cos_c > 0:
-        # Blend zone (0 < theta < pi/2): wall_weight goes 0→1 via smoothstep.
-        abs_sin = -sin_c    # > 0 here
-        abs_cos = cos_c     # > 0 here
-        w = abs_cos / (abs_sin + abs_cos)
-        wall_weight = w * w * (3.0 - 2.0 * w)
+    # Corner-arc clearance: no wheel circle may overlap the solid-block corner.
+    worst_deficit = 0.0
+    best_dx_w = best_dy_w = 0.0
+    for side in (-1.0, +1.0):
+        dx_w = wg.bar_len * float(np.cos(c + side * wg.spread))
+        dy_w = wg.bar_len * float(np.sin(c + side * wg.spread))
+        wx = x + dx_w
+        wy = y + dy_w
+        dist = float(np.hypot(wx - wall_x, wy - ceiling_y))
+        deficit = wg.wheel_r - dist
+        if deficit > worst_deficit:
+            worst_deficit = deficit
+            best_dx_w, best_dy_w = dx_w, dy_w
 
-        y_ceil = ceiling_y + floor_y_for_assembly(theta, wg)
-        x_wall = wall_x_exterior_for_assembly(theta, wg, wall_x)
-        y_fall = min(y, ceiling_y)
+    if worst_deficit > 0.0:
+        wx = x + best_dx_w
+        wy = y + best_dy_w
+        dist = float(np.hypot(wx - wall_x, wy - ceiling_y))
+        if dist > 1e-9:
+            scale = wg.wheel_r / dist
+            x = wall_x + (wx - wall_x) * scale - best_dx_w
+            y = ceiling_y + (wy - ceiling_y) * scale - best_dy_w
 
-        x = x + wall_weight * (x_wall - x)
-        y = y_ceil * (1.0 - wall_weight) + y_fall * wall_weight
+    # Clamp: assembly centre must not enter solid block (x < wall_x AND y > ceiling_y).
+    if x < wall_x and y > ceiling_y:
+        x = wall_x
 
     return x, y
 
@@ -688,28 +782,29 @@ def apply_outside_constraint(
 
 def _thin_edge_contact_adjust(
     x: float, y: float, theta: float,
-    wg: WheelGeometry, edge_y: float = 1.5,
+    wg: WheelGeometry, edge_y: float = 1.5, edge_x: float = np.inf,
 ) -> Tuple[float, float]:
     """
     Surface-contact adjustment for the thin-edge constraint.
 
-    The thin edge is a horizontal surface at y=edge_y extending leftward from
-    its right terminus at x=edge_x.  Two orientations are recognised:
-
-      wheels face DOWN  (sin(theta-π/2) < 0)  →  assembly rests ON TOP of edge
-      wheels face UP    (sin(theta-π/2) > 0)  →  assembly hangs from BELOW edge
-
-    x is not constrained; only y is adjusted.
+    Continuous blend from L-wheel-on-top to R-wheel-on-bottom using sin(c)
+    as the blend parameter.  sin(c) = -1 when V points down (top surface),
+    +1 when V points up (bottom surface).  Smoothstep avoids the three
+    discontinuities that the old pivot-branching logic produced.
     """
     c = theta - np.pi / 2
-    sin_c = np.sin(c)
-    cos_c = np.cos(c)
+    sin_c = float(np.sin(c))
 
-    if abs(sin_c) > abs(cos_c):
-        if sin_c < 0:   # wheels face DOWN → on top of edge
-            y = edge_y + floor_y_for_assembly(theta, wg)
-        else:            # wheels face UP → on bottom of edge
-            y = ceiling_y_for_assembly(theta, wg, edge_y)
+    dy_L = wg.bar_len * float(np.sin(c - wg.spread))
+    dy_R = wg.bar_len * float(np.sin(c + wg.spread))
+
+    y_L_top = edge_y + wg.wheel_r - dy_L   # joint y: L wheel on TOP surface
+    y_R_bot = edge_y - wg.wheel_r - dy_R   # joint y: R wheel on BOTTOM surface
+
+    # Smoothstep blend: 0 → top (sin_c = -1), 1 → bottom (sin_c = +1)
+    t = (sin_c + 1.0) * 0.5
+    w = t * t * (3.0 - 2.0 * t)
+    y = y_L_top * (1.0 - w) + y_R_bot * w
 
     return x, y
 
@@ -719,18 +814,19 @@ def apply_thin_edge_constraint(
     x2: float, y2: float, theta2: float,
     wg: WheelGeometry,
     edge_y: float = 1.5,
+    edge_x: float = np.inf,
 ) -> Tuple[float, float, float, float]:
     """
     Auto-adjust poses for the thin-edge constraint.
 
-    The thin horizontal edge is at y=edge_y.  The linkage wraps around its
-    right terminus; the two assemblies are on opposite faces of the edge.
+    The thin horizontal edge is at y=edge_y with its right terminus at x=edge_x.
+    The linkage wraps around the terminus; assemblies are on opposite faces.
 
-      wheels face DOWN (sin(theta-π/2) < 0) → on top of edge (y auto-set)
-      wheels face UP   (sin(theta-π/2) > 0) → below edge     (y auto-set)
+    Uses pivot-wheel contact: the wheel that remains on the flat surface side
+    (x ≤ edge_x) defines the assembly height.  See _thin_edge_contact_adjust.
 
     x is not modified.  Returns (x1, y1, x2, y2).
     """
-    x1, y1 = _thin_edge_contact_adjust(x1, y1, theta1, wg, edge_y)
-    x2, y2 = _thin_edge_contact_adjust(x2, y2, theta2, wg, edge_y)
+    x1, y1 = _thin_edge_contact_adjust(x1, y1, theta1, wg, edge_y, edge_x)
+    x2, y2 = _thin_edge_contact_adjust(x2, y2, theta2, wg, edge_y, edge_x)
     return x1, y1, x2, y2
