@@ -182,6 +182,8 @@ def solve_ik(
         x1, y1, x2, y2 = apply_ceiling_constraint(x1, y1, theta1, x2, y2, theta2, wg, wall_x, ceiling_y)
     elif constraint_set == "outside":
         x1, y1, x2, y2 = apply_outside_constraint(x1, y1, theta1, x2, y2, theta2, wg, wall_x, ceiling_y)
+    elif constraint_set == "wall_exact":
+        pass  # exact positions from keyframes; skip contact adjustment
     elif constraint_set == "outside_exact":
         pass  # exact pivot positions from keyframes; skip contact adjustment
     elif constraint_set == "thin_edge_exact":
@@ -220,7 +222,8 @@ def solve_ik(
             smooth_cost = _smooth_cost(q_vec, q_ref, eff_smooth)
             total_cost  = kin_cost + pen_cost + smooth_cost
             candidates.append((total_cost, q_vec))
-            if constraint_set in ("outside", "outside_exact", "thin_edge", "thin_edge_exact"):
+            if constraint_set in ("outside", "outside_exact",
+                                    "thin_edge", "thin_edge_exact"):
                 # Tie-break by kin_cost (neutral posture) when penalties are equal.
                 # Weight 0.001 is negligible during warm frames where smooth_cost
                 # dominates, but matters at cold restarts where smooth_cost=0 and
@@ -230,12 +233,6 @@ def solve_ik(
                 if combined < best_pen_val:
                     best_pen_val = combined
                     best_pen_q   = q_vec.copy()
-
-    if q_init is not None:
-        q0  = q_ref
-        pen = total_penalty(q0, *kin_args, wg, constraint_set,
-                            wall_x=wall_x, ceiling_y=ceiling_y)
-        candidates.append((float(np.dot(q0, q0)) + pen, q0))
 
     if not candidates:
         raise RuntimeError("No feasible configuration found on the q1 grid.")
@@ -247,7 +244,8 @@ def solve_ik(
     best_q   = top_seeds[0].copy()
     best_val = np.inf
 
-    if constraint_set in ("outside", "outside_exact", "thin_edge", "thin_edge_exact"):
+    if constraint_set in ("outside", "outside_exact",
+                           "thin_edge", "thin_edge_exact"):
         # Grid candidates are analytically exact (zero kinematic residual).
         # Powell / BFGS can drift off the constraint surface in crossing-penalty
         # landscapes where local minima exist at non-zero kinematic residual
@@ -260,8 +258,13 @@ def solve_ik(
         # the kinematic residual.  With pen_weight=1e4 (default), the hard-
         # penalty gradient dominates at kin_res≈0 (where ∂kin/∂q≈0), causing
         # BFGS to drift away from analytically-exact grid seeds.
+        # grid scoring still uses eff_smooth so the warm branch is preferred;
+        # BFGS itself must use 0 to avoid the false-minimum at q_prev (see
+        # solver notes: f(q_prev)=kin_res²≈0 dominates 200·||Δq||² for small
+        # per-frame geometry changes, freezing the solver).
+        wall_smooth = 0.0
         polish_args = (*kin_args, wg, constraint_set, wall_x, ceiling_y,
-                       q_ref, 0.0, 0.0)   # smooth_weight=0, pen_weight=0
+                       q_ref, wall_smooth, 0.0)   # pen_weight=0
         converged = []
         for q0 in top_seeds:
             result = minimize(

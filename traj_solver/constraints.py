@@ -3,8 +3,17 @@ Constraint sets for the wheeled-robot IK solver.
 
 Constraint sets
 ---------------
-"none"  : Purely kinematic IK — no physical constraints (useful for debugging).
-"floor" : Wheels coincident with floor (y = 0); linkage stays above floor.
+"none"         : Purely kinematic IK — no physical constraints (debugging only).
+"floor"        : Wheels on floor (y = 0); linkage stays above floor.
+"wall"         : Inside floor-wall corner (left wall + floor).
+"ceiling"      : Inside wall-ceiling corner (left wall + ceiling).
+"outside"      : Exterior top-left corner (ceiling top + left wall exterior);
+                 contact position computed from theta by _outside_contact_adjust.
+"outside_exact": Same penalties as "outside" but exact (x, y) positions passed
+                 through unchanged — used during pivot phases where the contact
+                 formula would give the wrong surface.
+"thin_edge"    : On top of a thin horizontal edge; wraps around the right terminus.
+"thin_edge_exact": Same as thin_edge but positions passed through unchanged.
 
 The no-self-collision rule (linkage must not intersect wheels or wishbone bars)
 is active for every set except "none".
@@ -24,31 +33,56 @@ from kinematics import forward_kinematics
 @dataclass
 class WheelGeometry:
     """Physical dimensions of the wheel assemblies."""
-    bar_len: float = 0.25       # length of each wishbone arm (joint → wheel)
-    wheel_r: float = 0.12       # wheel radius
+    bar_len: float = 0.140      # arm length from V-apex to each wheel centre
+    wheel_r: float = 0.050      # wheel radius
     spread:  float = np.pi / 4  # half-angle of the V opening
+    calf:    float = 0.042      # vertical strut from V-apex up to elbow
+    thigh:   float = 0.08951      # horizontal strut from elbow to chain joint (q1/q4)
 
 
-CONSTRAINT_SETS = ("none", "floor", "wall", "ceiling", "outside", "outside_exact", "thin_edge", "thin_edge_exact")
+CONSTRAINT_SETS = ("none", "floor", "wall", "wall_exact", "ceiling", "outside", "outside_exact", "thin_edge", "thin_edge_exact")
 
 
 # ------------------------------------------------------------------ #
 #  Wheel center helpers (must match visualize._draw_assembly)        #
 # ------------------------------------------------------------------ #
 
+def _v_apex(cx: float, cy: float, theta: float, wg: WheelGeometry,
+            side: int = 1) -> Tuple[float, float]:
+    """
+    Return the V-apex (bar midpoint) position given the chain-joint (cx, cy).
+
+    The L-bracket connecting the chain joint to the V-apex consists of:
+      thigh — horizontal in the assembly frame, pointing AWAY from the chain
+              (+theta direction for assembly 1 / side=+1; opposite for side=-1)
+      calf  — perpendicular to theta, pointing toward the surface
+              (direction theta - π/2, i.e. downward when theta=0)
+
+    side=+1  assembly 1 (q1): thigh points backward  (-theta direction from joint)
+    side=-1  assembly 2 (q4): thigh points forward   (+theta direction from joint)
+    """
+    vx = cx - side * wg.thigh * np.cos(theta) + wg.calf * np.sin(theta)
+    vy = cy - side * wg.thigh * np.sin(theta) - wg.calf * np.cos(theta)
+    return vx, vy
+
+
 def wheel_centers(
-    cx: float, cy: float, theta: float, wg: WheelGeometry
+    cx: float, cy: float, theta: float, wg: WheelGeometry, side: int = 1
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Return (left, right) wheel center positions for one assembly."""
+    """Return (left, right) wheel center positions for one assembly.
+
+    side=+1 for assembly 1 (q1 joint), side=-1 for assembly 2 (q4 joint).
+    """
+    vx, vy = _v_apex(cx, cy, theta, wg, side)
     c = theta - np.pi / 2          # rearward centreline; down at theta=0
-    left  = np.array([cx + wg.bar_len * np.cos(c - wg.spread),
-                      cy + wg.bar_len * np.sin(c - wg.spread)])
-    right = np.array([cx + wg.bar_len * np.cos(c + wg.spread),
-                      cy + wg.bar_len * np.sin(c + wg.spread)])
+    left  = np.array([vx + wg.bar_len * np.cos(c - wg.spread),
+                      vy + wg.bar_len * np.sin(c - wg.spread)])
+    right = np.array([vx + wg.bar_len * np.cos(c + wg.spread),
+                      vy + wg.bar_len * np.sin(c + wg.spread)])
     return left, right
 
 
-def floor_y_for_assembly(theta: float, wg: WheelGeometry) -> float:
+def floor_y_for_assembly(theta: float, wg: WheelGeometry, side: int = 1) -> float:
     """
     Return the y of the assembly joint such that the lowest wheel centre
     is exactly at y = wheel_r  (wheel tangent to the floor at y=0).
@@ -56,11 +90,12 @@ def floor_y_for_assembly(theta: float, wg: WheelGeometry) -> float:
     c = theta - np.pi / 2
     y_offsets = [wg.bar_len * np.sin(c - wg.spread),
                  wg.bar_len * np.sin(c + wg.spread)]
-    return wg.wheel_r - min(y_offsets)
+    y_vapex = wg.wheel_r - min(y_offsets)  # V-apex y that gives floor contact
+    return y_vapex + side * wg.thigh * np.sin(theta) + wg.calf * np.cos(theta)
 
 
 def wall_x_for_assembly(theta: float, wg: WheelGeometry,
-                         wall_x: float = 0.0) -> float:
+                         wall_x: float = 0.0, side: int = 1) -> float:
     """
     Return the x of the assembly joint such that the leftmost wheel centre
     is exactly at x = wall_x + wheel_r  (wheel tangent to the wall).
@@ -68,11 +103,12 @@ def wall_x_for_assembly(theta: float, wg: WheelGeometry,
     c = theta - np.pi / 2
     x_offsets = [wg.bar_len * np.cos(c - wg.spread),
                  wg.bar_len * np.cos(c + wg.spread)]
-    return wall_x + wg.wheel_r - min(x_offsets)
+    x_vapex = wall_x + wg.wheel_r - min(x_offsets)
+    return x_vapex + side * wg.thigh * np.cos(theta) - wg.calf * np.sin(theta)
 
 
 def ceiling_y_for_assembly(theta: float, wg: WheelGeometry,
-                            ceiling_y: float = 3.0) -> float:
+                            ceiling_y: float = 0.55, side: int = 1) -> float:
     """
     Return the y of the assembly joint such that the highest wheel centre
     is exactly at y = ceiling_y - wheel_r  (wheel tangent to ceiling from below).
@@ -80,11 +116,12 @@ def ceiling_y_for_assembly(theta: float, wg: WheelGeometry,
     c = theta - np.pi / 2
     y_offsets = [wg.bar_len * np.sin(c - wg.spread),
                  wg.bar_len * np.sin(c + wg.spread)]
-    return ceiling_y - wg.wheel_r - max(y_offsets)
+    y_vapex = ceiling_y - wg.wheel_r - max(y_offsets)
+    return y_vapex + side * wg.thigh * np.sin(theta) + wg.calf * np.cos(theta)
 
 
 def wall_x_exterior_for_assembly(theta: float, wg: WheelGeometry,
-                                  wall_x: float = 0.0) -> float:
+                                  wall_x: float = 0.0, side: int = 1) -> float:
     """
     Return the x of the assembly joint such that the rightmost wheel centre
     is exactly at x = wall_x - wheel_r  (wheel tangent to wall from the left,
@@ -93,13 +130,14 @@ def wall_x_exterior_for_assembly(theta: float, wg: WheelGeometry,
     c = theta - np.pi / 2
     x_offsets = [wg.bar_len * np.cos(c - wg.spread),
                  wg.bar_len * np.cos(c + wg.spread)]
-    return wall_x - wg.wheel_r - max(x_offsets)
+    x_vapex = wall_x - wg.wheel_r - max(x_offsets)
+    return x_vapex + side * wg.thigh * np.cos(theta) - wg.calf * np.sin(theta)
 
 
 def _surface_contact_adjust(
     x: float, y: float, theta: float,
     wg: WheelGeometry, wall_x: float = 0.0,
-    ceiling_y: float = None,
+    ceiling_y: float = None, side: int = 1,
 ) -> Tuple[float, float]:
     """
     Auto-adjust (x, y) so wheels are tangent to whichever surface(s) they face.
@@ -119,13 +157,13 @@ def _surface_contact_adjust(
 
     if ceiling_y is None:
         if abs(sin_c) > abs(cos_c) and sin_c < 0:   # primarily downward → floor
-            y = floor_y_for_assembly(theta, wg)
+            y = floor_y_for_assembly(theta, wg, side)
     else:
         if abs(sin_c) > abs(cos_c) and sin_c > 0:   # primarily upward → ceiling
-            y = ceiling_y_for_assembly(theta, wg, ceiling_y)
+            y = ceiling_y_for_assembly(theta, wg, ceiling_y, side)
 
     if abs(cos_c) > abs(sin_c) and cos_c < 0:       # primarily leftward → wall
-        x = wall_x_for_assembly(theta, wg, wall_x)
+        x = wall_x_for_assembly(theta, wg, wall_x, side)
 
     return x, y
 
@@ -228,23 +266,26 @@ def _v_cone_entry_penalty(
 #  Individual penalty terms                                           #
 # ------------------------------------------------------------------ #
 
-def _joint_sign_penalty(q: np.ndarray, require_negative: bool = True) -> float:
+def _joint_sign_penalty(q: np.ndarray, require_negative: bool = True,
+                        constant: float = 1.0) -> float:
     """
     Penalty for q2 or q3 violating their required sign.
 
-    require_negative=True  (wall, ceiling):  penalise qi > 0
-    require_negative=False (outside, thin_edge): penalise qi < 0
+    require_negative=True  (wall, ceiling, thin_edge): penalise qi > 0
+    require_negative=False (outside): penalise qi < 0
 
-    Uses constant-plus-quadratic so even a tiny violation costs 1.0 base
-    (scaled by weight=1e4 in total_penalty → 1e4 per offending joint).
-    This makes the sign boundary a near-hard constraint.
+    constant=1.0 (default): hard barrier — even a tiny violation costs 1e4
+    constant=0.0: soft quadratic — penalty grows smoothly from 0 at the
+                  boundary, letting the solver cross q=0 without a cliff
+                  (used for thin_edge_exact so the pivot phases can
+                  transition smoothly without branch-switch teleportation)
     """
     penalty = 0.0
     for qi in (float(q[1]), float(q[2])):
         if require_negative and qi > 0.0:
-            penalty += 1.0 + qi * qi
+            penalty += constant + qi * qi
         elif not require_negative and qi < 0.0:
-            penalty += 1.0 + qi * qi
+            penalty += constant + qi * qi
     return penalty
 
 
@@ -263,9 +304,9 @@ def _collision_penalty(
     """
     P = positions  # P[0]=q1 … P[3]=q4
 
-    # Wheel centres
-    lf, rf = wheel_centers(x1, y1, theta1, wg)
-    lb, rb = wheel_centers(float(P[3][0]), float(P[3][1]), theta_end, wg)
+    # Wheel centres (side=+1 for front assembly, side=-1 for back assembly)
+    lf, rf = wheel_centers(x1, y1, theta1, wg, side=1)
+    lb, rb = wheel_centers(float(P[3][0]), float(P[3][1]), theta_end, wg, side=-1)
     all_wheels = (lf, rf, lb, rb)
 
     # Wishbone bars (root, tip)
@@ -311,8 +352,8 @@ def _no_overlap_penalty(
     """
     P = positions
 
-    lf, rf = wheel_centers(x1, y1, theta1, wg)
-    lb, rb = wheel_centers(float(P[3][0]), float(P[3][1]), theta_end, wg)
+    lf, rf = wheel_centers(x1, y1, theta1, wg, side=1)
+    lb, rb = wheel_centers(float(P[3][0]), float(P[3][1]), theta_end, wg, side=-1)
     all_wheels = (lf, rf, lb, rb)
 
     penalty = 0.0
@@ -358,8 +399,8 @@ def _wall_penalty(
     joints P1/P2 must stay at x >= wall_x.
     """
     P = positions
-    lf, rf = wheel_centers(x1, y1, theta1, wg)
-    lb, rb = wheel_centers(float(P[3][0]), float(P[3][1]), theta_end, wg)
+    lf, rf = wheel_centers(x1, y1, theta1, wg, side=1)
+    lb, rb = wheel_centers(float(P[3][0]), float(P[3][1]), theta_end, wg, side=-1)
 
     penalty = 0.0
 
@@ -535,8 +576,8 @@ def _ceiling_penalty(
     joints P1/P2 must stay at y <= ceiling_y.
     """
     P = positions
-    lf, rf = wheel_centers(x1, y1, theta1, wg)
-    lb, rb = wheel_centers(float(P[3][0]), float(P[3][1]), theta_end, wg)
+    lf, rf = wheel_centers(x1, y1, theta1, wg, side=1)
+    lb, rb = wheel_centers(float(P[3][0]), float(P[3][1]), theta_end, wg, side=-1)
 
     penalty = 0.0
 
@@ -608,25 +649,41 @@ def total_penalty(
     # thin_edge: joints must bend outward (q2>0, q3>0) during normal travel
     #   but the sign flips discontinuously near the 180° wrap; omit for
     #   thin_edge_exact (pivot phases) to avoid false rejections.
-    if constraint_set in ("wall", "ceiling"):
+    if constraint_set in ("wall", "wall_exact", "ceiling"):
         pen += _joint_sign_penalty(q, require_negative=True)
     elif constraint_set in ("outside", "outside_exact"):
         q3 = float(q[2])
         if q3 > 0.0:
-            pen += 1.0 + q3 * q3   # keep q3 ≤ 0 (elbow-up); q2 unconstrained
+            # "outside_exact" is used during pivot transitions where q3 can
+            # legitimately cross 0; use a soft quadratic so the solver can
+            # pass through q3=0 without a discontinuous cost cliff.
+            # "outside" uses a hard barrier (same as wall/ceiling).
+            if constraint_set == "outside_exact":
+                pen += q3 * q3
+            else:
+                pen += 1.0 + q3 * q3
     elif constraint_set == "thin_edge":
-        pen += _joint_sign_penalty(q, require_negative=False)
-    # thin_edge_exact: no joint sign penalty (chain flips through ±180° during pivot)
+        pen += _joint_sign_penalty(q, require_negative=True, constant=1.0)
+    elif constraint_set == "thin_edge_exact":
+        # Soft quadratic — no constant base so the solver can cross q=0
+        # without hitting a cliff, preventing branch-switch teleportation.
+        pen += _joint_sign_penalty(q, require_negative=True, constant=0.0)
+    # thin_edge / thin_edge_exact: q2 < 0, q3 < 0 preferred (elbow-up arch)
     # V-cone penalty is skipped for outside/thin_edge: the linkage necessarily
     # exits the apex through the V opening toward the surface, which is valid.
     if constraint_set not in ("outside", "outside_exact", "thin_edge", "thin_edge_exact"):
         pen += _v_cone_entry_penalty(positions, theta_end, theta1, wg)
 
-    if constraint_set in ("floor", "wall"):
+    if constraint_set in ("floor", "wall", "wall_exact"):
         pen += _floor_penalty(positions)
 
-    if constraint_set in ("wall", "ceiling"):
+    if constraint_set in ("wall", "wall_exact", "ceiling"):
         pen += _wall_penalty(positions, theta_end, x1, y1, theta1, wg, wall_x)
+        _qlim = 2.0 * np.pi / 3.0  # 120°
+        for _qi_idx in (0, 3):
+            _exc = abs(float(q[_qi_idx])) - _qlim
+            if _exc > 0.0:
+                pen += _exc * _exc
 
     if constraint_set == "ceiling":
         pen += _ceiling_penalty(positions, theta_end, x1, y1, theta1, wg, ceiling_y)
@@ -634,6 +691,14 @@ def total_penalty(
     if constraint_set in ("outside", "outside_exact"):
         pen += _outside_corner_penalty(positions, wall_x, ceiling_y)
         pen += _outside_surface_crossing_penalty(positions, wall_x, ceiling_y)
+        # Soft quadratic penalty for |q1| or |q4| approaching the physical
+        # 135° limit.  Onset at 120° (= 2π/3) so the global search strongly
+        # prefers configurations that stay within physical range.
+        _q_soft_lim = 2.0 * np.pi / 3.0  # 120°
+        for _qi in (float(q[0]), float(q[3])):
+            _exc = abs(_qi) - _q_soft_lim
+            if _exc > 0.0:
+                pen += _exc * _exc
 
     if constraint_set in ("thin_edge", "thin_edge_exact"):
         # wall_x is repurposed as edge_x (right terminus); ceiling_y as edge_y (edge height).
@@ -676,8 +741,8 @@ def apply_wall_constraint(
 
     Returns (x1, y1, x2, y2).
     """
-    x1, y1 = _surface_contact_adjust(x1, y1, theta1, wg, wall_x)
-    x2, y2 = _surface_contact_adjust(x2, y2, theta2, wg, wall_x)
+    x1, y1 = _surface_contact_adjust(x1, y1, theta1, wg, wall_x, side=1)
+    x2, y2 = _surface_contact_adjust(x2, y2, theta2, wg, wall_x, side=-1)
     return x1, y1, x2, y2
 
 
@@ -697,14 +762,15 @@ def apply_ceiling_constraint(
 
     Returns (x1, y1, x2, y2).
     """
-    x1, y1 = _surface_contact_adjust(x1, y1, theta1, wg, wall_x, ceiling_y)
-    x2, y2 = _surface_contact_adjust(x2, y2, theta2, wg, wall_x, ceiling_y)
+    x1, y1 = _surface_contact_adjust(x1, y1, theta1, wg, wall_x, ceiling_y, side=1)
+    x2, y2 = _surface_contact_adjust(x2, y2, theta2, wg, wall_x, ceiling_y, side=-1)
     return x1, y1, x2, y2
 
 
 def _outside_contact_adjust(
     x: float, y: float, theta: float,
-    wg: WheelGeometry, wall_x: float = 0.0, ceiling_y: float = 3.0,
+    wg: WheelGeometry, wall_x: float = 0.0, ceiling_y: float = 0.55,
+    side: int = 1,
 ) -> Tuple[float, float]:
     """
     Surface-contact adjustment for the "outside" corner geometry.
@@ -716,42 +782,48 @@ def _outside_contact_adjust(
         - front wheel has reached wall       → front wheel on wall sets x
       theta >= pi/2 : wall mode, standard x_exterior formula
     """
-    c = float(theta) - np.pi / 2
-
-    dy_R = wg.bar_len * float(np.sin(c + wg.spread))
-
     if theta >= np.pi / 2:
         # Both wheels fully wall-facing: use standard wall-exterior positioning.
-        x = wall_x_exterior_for_assembly(theta, wg, wall_x)
+        x = wall_x_exterior_for_assembly(theta, wg, wall_x, side)
         y = min(y, ceiling_y)
     else:
         # Ceiling or double-contact pivot: enforce back-wheel ceiling contact on y.
-        # The IK's x is taken as-is — keyframes encode the correct x_dc trajectory
-        # so that when x = x_dc(theta) the front wheel is simultaneously on the wall.
-        y = ceiling_y + wg.wheel_r - dy_R
+        # back (right) wheel: V-apex offset + arm offset gives wheel y.
+        # joint_y = ceiling_y + wheel_r - vy_offset - dy_R
+        vy_offset = -side * wg.thigh * np.sin(theta) - wg.calf * np.cos(theta)
+        c = float(theta) - np.pi / 2
+        dy_R = wg.bar_len * float(np.sin(c + wg.spread))
+        y = ceiling_y + wg.wheel_r - vy_offset - dy_R
 
     # Corner-arc clearance: no wheel circle may overlap the solid-block corner.
+    # Wheel positions come from V-apex, so compute V-apex first.
+    vx, vy = _v_apex(x, y, theta, wg, side)
+    c = float(theta) - np.pi / 2
     worst_deficit = 0.0
-    best_dx_w = best_dy_w = 0.0
-    for side in (-1.0, +1.0):
-        dx_w = wg.bar_len * float(np.cos(c + side * wg.spread))
-        dy_w = wg.bar_len * float(np.sin(c + side * wg.spread))
-        wx = x + dx_w
-        wy = y + dy_w
+    best_vdx_w = best_vdy_w = 0.0
+    for ws in (-1.0, +1.0):          # ws = wheel side: -1 left, +1 right
+        dx_w = wg.bar_len * float(np.cos(c + ws * wg.spread))
+        dy_w = wg.bar_len * float(np.sin(c + ws * wg.spread))
+        wx = vx + dx_w
+        wy = vy + dy_w
         dist = float(np.hypot(wx - wall_x, wy - ceiling_y))
         deficit = wg.wheel_r - dist
         if deficit > worst_deficit:
             worst_deficit = deficit
-            best_dx_w, best_dy_w = dx_w, dy_w
+            best_vdx_w, best_vdy_w = dx_w, dy_w
 
     if worst_deficit > 0.0:
-        wx = x + best_dx_w
-        wy = y + best_dy_w
+        wx = vx + best_vdx_w
+        wy = vy + best_vdy_w
         dist = float(np.hypot(wx - wall_x, wy - ceiling_y))
         if dist > 1e-9:
             scale = wg.wheel_r / dist
-            x = wall_x + (wx - wall_x) * scale - best_dx_w
-            y = ceiling_y + (wy - ceiling_y) * scale - best_dy_w
+            # Push V-apex so this wheel is at distance wheel_r from corner.
+            vx = wall_x + (wx - wall_x) * scale - best_vdx_w
+            vy = ceiling_y + (wy - ceiling_y) * scale - best_vdy_w
+            # Recover joint position from new V-apex.
+            x = vx + side * wg.thigh * np.cos(theta) - wg.calf * np.sin(theta)
+            y = vy + side * wg.thigh * np.sin(theta) + wg.calf * np.cos(theta)
 
     # Clamp: assembly centre must not enter solid block (x < wall_x AND y > ceiling_y).
     if x < wall_x and y > ceiling_y:
@@ -775,14 +847,15 @@ def apply_outside_constraint(
 
     Returns (x1, y1, x2, y2).
     """
-    x1, y1 = _outside_contact_adjust(x1, y1, theta1, wg, wall_x, ceiling_y)
-    x2, y2 = _outside_contact_adjust(x2, y2, theta2, wg, wall_x, ceiling_y)
+    x1, y1 = _outside_contact_adjust(x1, y1, theta1, wg, wall_x, ceiling_y, side=1)
+    x2, y2 = _outside_contact_adjust(x2, y2, theta2, wg, wall_x, ceiling_y, side=-1)
     return x1, y1, x2, y2
 
 
 def _thin_edge_contact_adjust(
     x: float, y: float, theta: float,
-    wg: WheelGeometry, edge_y: float = 1.5, edge_x: float = np.inf,
+    wg: WheelGeometry, edge_y: float = 0.40, edge_x: float = np.inf,
+    side: int = 1,
 ) -> Tuple[float, float]:
     """
     Surface-contact adjustment for the thin-edge constraint.
@@ -798,8 +871,11 @@ def _thin_edge_contact_adjust(
     dy_L = wg.bar_len * float(np.sin(c - wg.spread))
     dy_R = wg.bar_len * float(np.sin(c + wg.spread))
 
-    y_L_top = edge_y + wg.wheel_r - dy_L   # joint y: L wheel on TOP surface
-    y_R_bot = edge_y - wg.wheel_r - dy_R   # joint y: R wheel on BOTTOM surface
+    # vy_correction converts V-apex y → joint y
+    vy_corr = side * wg.thigh * float(np.sin(theta)) + wg.calf * float(np.cos(theta))
+
+    y_L_top = edge_y + wg.wheel_r - dy_L + vy_corr   # joint y: L wheel on TOP surface
+    y_R_bot = edge_y - wg.wheel_r - dy_R + vy_corr   # joint y: R wheel on BOTTOM surface
 
     # Smoothstep blend: 0 → top (sin_c = -1), 1 → bottom (sin_c = +1)
     t = (sin_c + 1.0) * 0.5
@@ -827,6 +903,6 @@ def apply_thin_edge_constraint(
 
     x is not modified.  Returns (x1, y1, x2, y2).
     """
-    x1, y1 = _thin_edge_contact_adjust(x1, y1, theta1, wg, edge_y, edge_x)
-    x2, y2 = _thin_edge_contact_adjust(x2, y2, theta2, wg, edge_y, edge_x)
+    x1, y1 = _thin_edge_contact_adjust(x1, y1, theta1, wg, edge_y, edge_x, side=1)
+    x2, y2 = _thin_edge_contact_adjust(x2, y2, theta2, wg, edge_y, edge_x, side=-1)
     return x1, y1, x2, y2

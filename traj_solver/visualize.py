@@ -4,8 +4,6 @@ Matplotlib visualization of the robot configuration.
 
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-
 from kinematics import forward_kinematics
 
 
@@ -14,8 +12,10 @@ def plot_robot(
     x1, y1, theta1,
     x2, y2, theta2,
     l1, l2, l3,
-    axle_half_length=0.25,
-    wheel_radius=0.12,
+    axle_half_length=0.140,
+    wheel_radius=0.050,
+    calf=0.042,
+    thigh=0.140,
     ax=None,
     title=None,
 ):
@@ -78,9 +78,11 @@ def plot_robot(
 
     # --- Front and back assemblies (drawn at the actual q1 / q4 positions) ---
     _draw_assembly(ax, positions[0], theta1, axle_half_length, wheel_radius,
-                   color="forestgreen", label="Front assembly")
+                   color="forestgreen", label="Front assembly",
+                   calf=calf, thigh=thigh, side=1)
     _draw_assembly(ax, positions[-1], theta_end, axle_half_length, wheel_radius,
-                   color="crimson", label="Back assembly")
+                   color="crimson", label="Back assembly",
+                   calf=calf, thigh=thigh, side=-1)
 
     ax.set_aspect("equal")
     ax.grid(True, alpha=0.3, linestyle="--")
@@ -97,34 +99,44 @@ def plot_robot(
 
 
 def _draw_assembly(ax, joint_pos, theta, bar_len, wheel_r, color, label,
-                   spread=np.pi / 4):
+                   spread=np.pi / 4, calf=0.042, thigh=0.08951, side=1):
     """
-    Draw one wheel assembly as a wishbone (V-shape).
+    Draw one wheel assembly: L-bracket (thigh + calf) from chain joint to
+    V-apex, then two arms from V-apex to each wheel.
 
-    The joint (q1 or q4) is the apex of the V.  Two diagonal bars radiate from
-    it symmetrically, one to each wheel.  `theta` is the forward direction of
-    the assembly (apex points forward); wheels spread behind the joint.
-
-    Parameters
-    ----------
-    spread : float
-        Half-angle of the V opening, in radians (default π/4 = 45°).
+    joint_pos : (x, y) of the chain joint (q1 or q4)
+    theta     : assembly orientation (forward direction)
+    side      : +1 for assembly 1 (q1), -1 for assembly 2 (q4)
     """
     joint = np.asarray(joint_pos, dtype=float)
 
-    # Wheel positions: symmetric about the downward-perpendicular at theta=0.
-    # At theta=0 the chain points right (+x), so wheels hang below (-y = -π/2).
-    # The rearward centerline is theta - π/2, giving downward at zero degrees.
-    center = theta - np.pi / 2
-    left_wheel  = joint + bar_len * np.array([np.cos(center - spread),
-                                               np.sin(center - spread)])
-    right_wheel = joint + bar_len * np.array([np.cos(center + spread),
-                                               np.sin(center + spread)])
+    # V-apex: go from joint by -side*thigh in theta direction, then -calf
+    # in the (theta+π/2) direction (i.e. toward the surface).
+    v_apex = joint + np.array([
+        -side * thigh * np.cos(theta) + calf * np.sin(theta),
+        -side * thigh * np.sin(theta) - calf * np.cos(theta),
+    ])
+    elbow = joint + np.array([
+        -side * thigh * np.cos(theta),
+        -side * thigh * np.sin(theta),
+    ])
 
-    # Two diagonal bars from joint apex to each wheel
-    ax.plot([joint[0], left_wheel[0]],  [joint[1], left_wheel[1]],
-            "-", color=color, linewidth=2.5, zorder=2, label=label)
-    ax.plot([joint[0], right_wheel[0]], [joint[1], right_wheel[1]],
+    center = theta - np.pi / 2
+    left_wheel  = v_apex + bar_len * np.array([np.cos(center - spread),
+                                                np.sin(center - spread)])
+    right_wheel = v_apex + bar_len * np.array([np.cos(center + spread),
+                                                np.sin(center + spread)])
+
+    # Thigh (joint → elbow) and calf (elbow → V-apex)
+    ax.plot([joint[0], elbow[0]], [joint[1], elbow[1]],
+            "-", color=color, linewidth=2.0, zorder=2, label=label)
+    ax.plot([elbow[0], v_apex[0]], [elbow[1], v_apex[1]],
+            "-", color=color, linewidth=2.0, zorder=2)
+
+    # Two arms from V-apex to each wheel
+    ax.plot([v_apex[0], left_wheel[0]],  [v_apex[1], left_wheel[1]],
+            "-", color=color, linewidth=2.5, zorder=2)
+    ax.plot([v_apex[0], right_wheel[0]], [v_apex[1], right_wheel[1]],
             "-", color=color, linewidth=2.5, zorder=2)
 
     # Wheels
@@ -133,5 +145,5 @@ def _draw_assembly(ax, joint_pos, theta, bar_len, wheel_r, color, label,
         ax.add_patch(circle)
         ax.plot(*wpos, "o", color=color, markersize=5, zorder=3)
 
-    # Joint apex marker
+    # Joint marker
     ax.plot(*joint, "s", color=color, markersize=8, zorder=5)
