@@ -60,7 +60,9 @@ def main():
     #  Shared robot geometry — must match animate_transition.py exactly   #
     # ------------------------------------------------------------------ #
     l1, l2, l3 = 0.25, 0.50, 0.25
-    wg = WheelGeometry(bar_len=0.200, wheel_r=0.050, spread=np.pi / 4,
+    wg = WheelGeometry(bar_len=0.200, wheel_r=0.050,
+                       arm_a1=0.0, arm_b1=np.pi / 4,
+                       arm_a2=0.0, arm_b2=-np.pi / 4,
                        calf=0.042, thigh=0.08951)
 
     WALL_X    = 0.0
@@ -101,35 +103,32 @@ def main():
         label = "Wall → Ceiling  (t≈0.57)"
 
     elif scenario == "outside":
-        # t≈0.48: front has completed its pivot onto the exterior wall (theta=π/2),
-        # back still on ceiling at x2=0.300 waiting for front to finish (sequential design).
-        # Front pause keyframe: t=0.465–0.490; back approach begins at t=0.490.
-        # _XW=-0.191, _YW=0.541 (from _cj(π/2) with thigh=0.08951).
-        # _Y0=0.741  (from _cj(0)[1], the ceiling-top y for the assembly centre).
+        # t≈0.48: front done rotating (theta=π/2, at _XW/_YW), back on ceiling at x2=0.300.
+        # Poses computed from _cj(π/2) and _cj(0) with arm_b1=π/8 geometry.
         constraint_set = "outside_exact"
         wall_x    = WALL_X
         ceiling_y = CEILING_Y
-        x1, y1, theta1 = -0.191, 0.541,  np.pi / 2
-        x2, y2, theta2 =  0.300, 0.741,  0.0
+        x1, y1, theta1 = -0.277, 0.563,  np.pi / 2
+        x2, y2, theta2 =  0.300, 0.827,  0.0
         xlim = (-0.5, 1.5)
-        ylim = (-0.5, 1.0)
+        ylim = (-0.5, 1.1)
         label = "Outside corner  (t≈0.48)"
 
     elif scenario == "thin_edge":
-        # t=0.32: red (back) mid-pivot at phi=π/2 around right terminus;
-        # green (front) at x1=0.280 approaching its stop.
-        # EDGE_X=0.35, EDGE_Y=0.40.
-        # _cp_te(π/2): vx=0.499, vy=0.301
-        # _cj_te2(π/2): x2=0.541, y2=0.390  (thigh flips sign for side=-1)
-        # _Y0_TE=0.591  (green assembly y on top of edge)
+        # t≈0.35: red (back) mid-pivot at phi=π/2 around right terminus;
+        # green (front) approaching its stop.
+        # EDGE_X=0.44, EDGE_Y=0.50.  arm_a1=arm_a2=0 geometry.
+        # _cp_te(π/2): (EDGE_X+BAR, EDGE_Y+R) = (0.640, 0.550)
+        # _cj_te2(π/2): x2=0.640+calf=0.682, y2=0.550+thigh=0.640
+        # _Y0_TE = EDGE_Y+R+BAR+calf = 0.792
         constraint_set = "thin_edge_exact"
-        wall_x    = 0.35   # right terminus x
-        ceiling_y = 0.40   # edge y
-        x1, y1, theta1 =  0.280, 0.591,  0.0
-        x2, y2, theta2 =  0.541, 0.390, -np.pi / 2
-        xlim = (-0.6, 1.0)
-        ylim = (-0.1, 0.9)
-        label = "Thin edge  (t≈0.32)"
+        wall_x    = 0.44   # right terminus x (EDGE_X)
+        ceiling_y = 0.50   # edge y (EDGE_Y)
+        x1, y1, theta1 =  0.350, 0.792,  0.0
+        x2, y2, theta2 =  0.682, 0.640, -np.pi / 2
+        xlim = (-0.6, 1.2)
+        ylim = (-0.1, 1.1)
+        label = "Thin edge  (t≈0.35)"
 
     else:
         print(f"Unknown scenario '{scenario}'. "
@@ -186,9 +185,12 @@ def main():
         x2e, y2e, theta2,
         l1, l2, l3,
         axle_half_length=wg.bar_len,
+        axle_a_len=wg.bar_len_a,
         wheel_radius=wg.wheel_r,
         calf=wg.calf,
         thigh=wg.thigh,
+        arm_a1=wg.arm_a1, arm_b1=wg.arm_b1,
+        arm_a2=wg.arm_a2, arm_b2=wg.arm_b2,
         ax=ax,
     )
 

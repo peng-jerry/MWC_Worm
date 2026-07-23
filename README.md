@@ -1,6 +1,6 @@
-# MWC Worm — 2D Wheeled-Robot IK Solver
+# MWC Worm — 2D Wheeled-Robot IK Solver & Transition Animator
 
-Inverse kinematics for a planar serial-chain robot that connects two independently-mounted wheel assemblies. The robot navigates surfaces that share a corner: floor, wall, ceiling, and exterior (outside) corners.
+Inverse kinematics for a planar serial-chain robot that connects two independently-mounted wheel assemblies. The robot navigates surfaces that share a corner — floor, interior wall, interior ceiling, exterior corner, and thin horizontal edges — by solving a 4-DOF chain between the two assemblies at each animation frame.
 
 ## Robot topology
 
@@ -10,57 +10,112 @@ Front assembly (P0, θ₁)
                                        Back assembly (P3, θ₂)
 ```
 
-Four joint angles (q1–q4) connect the two wheel assemblies through three rigid links. Each assembly is a wishbone (V-shape): two diagonal bars radiate from the joint apex to a pair of wheels. The system has 3 pose constraints (x₂, y₂, θ₂) and 4 unknowns, leaving 1 redundant DOF that the solver resolves by minimising ‖q‖².
+Four joint angles (q1–q4) connect the two wheel assemblies through three rigid links. Each assembly is a wishbone (V-shape): two diagonal bars radiate from the joint apex to a pair of wheels. The system has 3 pose constraints (x₂, y₂, θ₂) and 4 unknowns, leaving 1 redundant DOF that the solver resolves by minimising ‖q‖² subject to surface-contact penalties.
 
-Default parameters (edit in `main.py`):
+## Robot parameters (1.0 m chain)
 
 | Parameter | Value | Description |
 |-----------|-------|-------------|
-| l1, l2, l3 | 1.2, 1.0, 1.2 m | Link lengths |
-| bar\_len | 0.25 m | Wishbone arm length (joint → wheel) |
-| wheel\_r | 0.12 m | Wheel radius |
+| l1, l2, l3 | 0.25, 0.50, 0.25 m | Link lengths (total 1.00 m) |
+| bar\_len | 0.200 m | Wishbone arm length (joint apex → wheel centre) |
+| wheel\_r | 0.050 m | Wheel radius |
 | spread | π/4 rad | Half-angle of the V opening |
+| thigh | 0.08951 m | Chain-joint offset along θ |
+| calf | 0.042 m | Chain-joint offset perpendicular to θ |
+
+Environment constants: `WALL_X = 0.0`, `CEILING_Y = 0.55`, `EDGE_X = 0.44`, `EDGE_Y = 0.50`.
+
+## Scenarios
+
+Four transition sequences are fully implemented and share a single set of keyframes in `animate_transition.SCENARIO_CONFIG`:
+
+| Scenario | Description | Violations |
+|----------|-------------|------------|
+| `floor_to_wall` | Inside bottom-left corner: floor → interior wall | CLEAN |
+| `wall_to_ceiling` | Inside top-left corner: interior wall → ceiling | 21 (pre-existing speed limits) |
+| `outside` | Outside top-left corner: ceiling top → exterior wall | CLEAN |
+| `thin_edge` | Thin horizontal edge: top surface → bottom surface | CLEAN |
+
+Violation thresholds: joint-angle jump ≥ 10°/frame (JUMP), wheel angular velocity > 0.70 rad/frame (OMEGA, equivalent to 0.035 m/frame at wheel\_r = 0.050).
 
 ## Constraint sets
 
-| Set | Front assembly | Back assembly |
-|-----|---------------|---------------|
-| `none` | free | free (purely kinematic) |
-| `floor` | wheels on floor (y = 0) | wheels on floor |
-| `wall` | floor or wall contact | floor or wall contact |
-| `ceiling` | ceiling or wall contact | ceiling or wall contact |
-| `outside` | on top of ceiling | on exterior face of wall |
-
-Contact surfaces are auto-detected from the assembly orientation θ and the y-coordinate is adjusted so the outermost wheel is tangent to the surface. For `outside`, the linkage is penalised for entering the solid corner block or the room interior, and is driven to pass exactly through the corner point (wall\_x, ceiling\_y).
+| Set | Behaviour |
+|-----|-----------|
+| `wall` | Interior corner: wheels snapped to floor or interior wall based on θ |
+| `ceiling` | Interior corner: wheels snapped to interior wall or ceiling based on θ |
+| `outside` | Exterior corner: ceiling-top or exterior-wall contact; crossing penalty keeps linkage outside the solid block |
+| `outside_exact` | Same penalties as `outside` but exact (x, y) positions from keyframes pass through unchanged |
+| `thin_edge_exact` | Exact positions for thin-edge pivot phases; no surface snap |
+| `floor` | Wheels on floor (y = 0) |
+| `none` | Purely kinematic — no surface constraints |
 
 ## Usage
 
 ```bash
 cd traj_solver
+
+# Run a full transition animation (saves MP4 or GIF):
+python animate_transition.py floor_to_wall
+python animate_transition.py wall_to_ceiling
+python animate_transition.py outside
+python animate_transition.py thin_edge
+
+# Skip rendering (violation check only, much faster):
+python animate_transition.py floor_to_wall --no-render
+
+# Wheel angular velocity + joint angle graph (saves PNG):
+python wheel_omega.py floor_to_wall
+python wheel_omega.py wall_to_ceiling
+python wheel_omega.py outside
+python wheel_omega.py thin_edge
+
+# Single-frame IK explorer:
 python main.py
 ```
 
-Edit `CONSTRAINT_SET` and the pose hints at the top of `main.py` to explore configurations. A matplotlib figure is saved to `robot_config.png`.
+Output files (written to `traj_solver/`):
+
+| File | Contents |
+|------|----------|
+| `floor_to_wall.mp4` | Floor-to-wall animation |
+| `wall_to_ceiling.mp4` | Wall-to-ceiling animation |
+| `outside.mp4` | Outside-corner animation |
+| `thin_edge.mp4` | Thin-edge animation |
+| `wheel_omega_ftw.png` | ω + joint-angle graph — floor_to_wall |
+| `wheel_omega_wtc.png` | ω + joint-angle graph — wall_to_ceiling |
+| `wheel_omega_out.png` | ω + joint-angle graph — outside |
+| `wheel_omega_te.png` | ω + joint-angle graph — thin_edge |
 
 ## Solver
 
-The solver uses three stages:
+1. **Grid sweep** — q1 is sampled over a dense grid in [−π, π]. For each q1 the remaining chain is solved analytically (law of cosines), yielding up to 2 exact solutions per grid point. Outside/thin-edge scenarios use 6× normal grid density.
+2. **Candidate scoring** — each solution is ranked by ‖q‖² + constraint penalty + smooth_weight·‖q − q_prev‖² (trajectory smoothness term, only active after the first frame).
+3. **Polish** — BFGS refines the top seeds to machine precision. Outside/thin-edge scenarios skip BFGS and use the best-penalty grid candidate directly, because the crossing-penalty landscape contains spurious local minima.
 
-1. **Grid sweep** — q1 is sampled over 360 values in [−π, π]. For each q1 the remaining chain is solved analytically (law of cosines), yielding up to 2 exact solutions per grid point.
-2. **Penalty ranking** — each candidate is scored by ‖q‖² + weighted constraint penalty and the top seeds are selected.
-3. **Polish** — BFGS (most constraint sets) or Powell (outside corner, where the crossing penalty has a zero-gradient minimum) refines the best seeds to machine precision.
+Key solver constants (per scenario):
 
-## Constraint feasibility limits
+| Scenario | smooth\_weight | cold\_at |
+|----------|---------------|---------|
+| floor\_to\_wall | 200.0 | None |
+| wall\_to\_ceiling | 60.0 | [0.29] |
+| outside | 200.0 | None |
+| thin\_edge | 30.0 | [0.50, 0.61] |
 
-For the `outside` corner with the default wheel geometry, the back assembly y-coordinate must satisfy **y₂ ≤ 1.99** (approximately). Above this limit the linkage's corner-wrapping segment collides with the right back wheel; there is no valid IK solution. The default `y2 = 1.5` sits safely inside this range with a wheel clearance of ~0.14.
-
-## File structure
+## Architecture
 
 ```
 traj_solver/
-  kinematics.py    forward kinematics and reachability check
-  constraints.py   penalty terms for each constraint set; surface-contact helpers
-  solver.py        grid sweep + analytic IK + BFGS/Powell polish
-  visualize.py     matplotlib drawing of robot, wheels, and surface lines
-  main.py          entry point — configure constraint set and pose hints here
+  animate_transition.py  trajectory solver + animation renderer; exports
+                         SCENARIO_CONFIG, wg, l1, l2, l3, WALL_X, CEILING_Y,
+                         EDGE_X, EDGE_Y for import by wheel_omega.py
+  wheel_omega.py         wheel ω + joint-angle graphs; imports all scenario
+                         data from animate_transition (single source of truth)
+  solver.py              grid sweep + analytic IK + BFGS polish
+  constraints.py         penalty terms, surface-contact helpers, WheelGeometry
+  kinematics.py          forward kinematics and reachability check
+  visualize.py           matplotlib robot drawing
+  main.py                single-frame IK explorer (configure pose hints here)
 ```
+
+`animate_transition.py` and `wheel_omega.py` always operate on the same keyframes: `wheel_omega.py` imports `SCENARIO_CONFIG` from `animate_transition.py` rather than maintaining its own copy.

@@ -180,6 +180,8 @@ def solve_ik(
         x1, y1, x2, y2 = apply_wall_constraint(x1, y1, theta1, x2, y2, theta2, wg, wall_x)
     elif constraint_set == "ceiling":
         x1, y1, x2, y2 = apply_ceiling_constraint(x1, y1, theta1, x2, y2, theta2, wg, wall_x, ceiling_y)
+    elif constraint_set == "ceiling_exact":
+        pass  # exact pivot positions from keyframes; skip contact adjustment
     elif constraint_set == "outside":
         x1, y1, x2, y2 = apply_outside_constraint(x1, y1, theta1, x2, y2, theta2, wg, wall_x, ceiling_y)
     elif constraint_set == "wall_exact":
@@ -277,7 +279,18 @@ def solve_ik(
             pe = float(np.hypot(pos_c[-1][0] - x2, pos_c[-1][1] - y2))
             ae = float(abs(np.arctan2(np.sin(th_c - theta2), np.cos(th_c - theta2))))
             if float(np.sqrt(pe**2 + ae**2)) < tol:
-                sel = result.fun + _smooth_cost(q_cand, q_ref, eff_smooth)
+                # Penalise |q1| or |q4| >= 135° heavily so the selector always
+                # prefers a sub-135° solution when one exists among converged
+                # candidates.  This fixes the warm-chain bias that lets BFGS
+                # drift to q4>135° while ignoring the qlim penalty (pen_weight=0
+                # during BFGS means the penalty is invisible to the optimiser).
+                _hard_lim = np.radians(135.0)
+                _hard_pen = 0.0
+                for _qi in (0, 3):
+                    _exc = abs(float(q_cand[_qi])) - _hard_lim
+                    if _exc > 0.0:
+                        _hard_pen += 1.0 + _exc * _exc
+                sel = result.fun + _hard_pen * 1e4 + _smooth_cost(q_cand, q_ref, eff_smooth)
                 converged.append((sel, q_cand))
 
         if converged:

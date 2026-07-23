@@ -13,9 +13,12 @@ def plot_robot(
     x2, y2, theta2,
     l1, l2, l3,
     axle_half_length=0.140,
+    axle_a_len=None,
     wheel_radius=0.050,
     calf=0.042,
     thigh=0.140,
+    arm_a1=0.0, arm_b1=np.pi / 4,
+    arm_a2=0.0, arm_b2=-np.pi / 4,
     ax=None,
     title=None,
 ):
@@ -76,13 +79,16 @@ def plot_robot(
             fontsize=7, color="gray",
         )
 
+    _bar_a = axle_a_len if axle_a_len is not None else axle_half_length
     # --- Front and back assemblies (drawn at the actual q1 / q4 positions) ---
     _draw_assembly(ax, positions[0], theta1, axle_half_length, wheel_radius,
                    color="forestgreen", label="Front assembly",
-                   calf=calf, thigh=thigh, side=1)
+                   calf=calf, thigh=thigh, side=1, arm_a=arm_a1, arm_b=arm_b1,
+                   bar_len_a=_bar_a)
     _draw_assembly(ax, positions[-1], theta_end, axle_half_length, wheel_radius,
                    color="crimson", label="Back assembly",
-                   calf=calf, thigh=thigh, side=-1)
+                   calf=calf, thigh=thigh, side=-1, arm_a=arm_a2, arm_b=arm_b2,
+                   bar_len_a=_bar_a)
 
     ax.set_aspect("equal")
     ax.grid(True, alpha=0.3, linestyle="--")
@@ -99,19 +105,19 @@ def plot_robot(
 
 
 def _draw_assembly(ax, joint_pos, theta, bar_len, wheel_r, color, label,
-                   spread=np.pi / 4, calf=0.042, thigh=0.08951, side=1):
+                   arm_a=0.0, arm_b=np.pi / 4,
+                   calf=0.042, thigh=0.08951, side=1, bar_len_a=None):
     """
     Draw one wheel assembly: L-bracket (thigh + calf) from chain joint to
     V-apex, then two arms from V-apex to each wheel.
 
     joint_pos : (x, y) of the chain joint (q1 or q4)
     theta     : assembly orientation (forward direction)
+    arm_a/arm_b : offsets from centreline c = theta − π/2 for each arm
     side      : +1 for assembly 1 (q1), -1 for assembly 2 (q4)
     """
     joint = np.asarray(joint_pos, dtype=float)
 
-    # V-apex: go from joint by -side*thigh in theta direction, then -calf
-    # in the (theta+π/2) direction (i.e. toward the surface).
     v_apex = joint + np.array([
         -side * thigh * np.cos(theta) + calf * np.sin(theta),
         -side * thigh * np.sin(theta) - calf * np.cos(theta),
@@ -122,10 +128,11 @@ def _draw_assembly(ax, joint_pos, theta, bar_len, wheel_r, color, label,
     ])
 
     center = theta - np.pi / 2
-    left_wheel  = v_apex + bar_len * np.array([np.cos(center - spread),
-                                                np.sin(center - spread)])
-    right_wheel = v_apex + bar_len * np.array([np.cos(center + spread),
-                                                np.sin(center + spread)])
+    _ba = bar_len_a if bar_len_a is not None else bar_len
+    left_wheel  = v_apex + _ba     * np.array([np.cos(center + arm_a),
+                                                np.sin(center + arm_a)])
+    right_wheel = v_apex + bar_len * np.array([np.cos(center + arm_b),
+                                                np.sin(center + arm_b)])
 
     # Thigh (joint → elbow) and calf (elbow → V-apex)
     ax.plot([joint[0], elbow[0]], [joint[1], elbow[1]],
