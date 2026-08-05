@@ -13,6 +13,11 @@ Chain topology:
     -> back assembly (x2,y2,theta2)
 
 All angles in radians.
+
+Display convention (wheel_omega.py, visualize.py, main.py):
+  q1_display = q1 - π/2   (0° = link straight up from front calf)
+  q4_display = q4 - π/2   (0° = last link directly above back calf, i.e. P2 above P3)
+  q2, q3 are displayed as-is.
 """
 
 import numpy as np
@@ -58,6 +63,20 @@ def forward_kinematics(q, x1, y1, theta1, l1, l2, l3):
     theta_end = phi3 + q4
 
     return np.stack([p0, p1, p2, p3]), theta_end
+
+
+def q_display(q):
+    """
+    Convert internal solver q to display convention:
+      q1_display = q1 - π/2  (0° when link is straight up from front calf)
+      q4_display = q4 - π/2  (0° when last link directly above back calf, P2 above P3)
+      q2, q3 unchanged.
+    Result is wrapped to [-π, π].
+    """
+    qd = np.asarray(q, dtype=float).copy()
+    qd[0] = (qd[0] - np.pi / 2 + np.pi) % (2 * np.pi) - np.pi
+    qd[3] = (qd[3] - np.pi / 2 + np.pi) % (2 * np.pi) - np.pi
+    return qd
 
 
 def reachability_check(x1, y1, x2, y2, l1, l2, l3):

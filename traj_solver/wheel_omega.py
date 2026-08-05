@@ -34,12 +34,14 @@ from animate_transition import (
     solve_trajectory, SCENARIO_CONFIG,
     wg, l1, l2, l3,
     WALL_X, CEILING_Y, EDGE_X, EDGE_Y,
+    N_FRAMES,
+    _WTC_T_APPROACH, _WTC_T_ROT_END, _WTC_T_SLIDE_0, _WTC_T_SLIDE_END, _WTC_ROT_DT,
+    _OUT_T_BACK_ARR, _OUT_T_FRONT_STOP, _OUT_T_ROT1_S, _OUT_T_ROT1_E,
+    _OUT_T_BOTH_S, _OUT_T_ROT2_E,
 )
 
 R   = wg.wheel_r   # 0.050 m
 TOL = 0.004
-
-N_FRAMES = 90
 
 SCENARIO = sys.argv[1] if len(sys.argv) > 1 else "floor_to_wall"
 
@@ -69,12 +71,12 @@ if SCENARIO == "floor_to_wall":
 
     PHASES = [
         (t2f(0.150), "front stops"),
-        (t2f(0.175), "front rotates"),
-        (t2f(0.305), "front on wall"),
-        (t2f(0.440), "both moving"),
-        (t2f(0.735), "back at corner"),
-        (t2f(0.760), "back rotates"),
-        (t2f(0.885), "back on wall"),
+        (t2f(0.183), "front rotates"),
+        (t2f(0.360), "front on wall"),
+        (t2f(0.480), "both moving"),
+        (t2f(0.775), "back at corner"),
+        (t2f(0.808), "back rotates"),
+        (t2f(0.977), "back on wall"),
     ]
 
 elif SCENARIO == "wall_to_ceiling":
@@ -88,13 +90,13 @@ elif SCENARIO == "wall_to_ceiling":
     def formula_B(w, wp): return  (w[0] - wp[0]) / R     # ceiling: right = +CCW
 
     PHASES = [
-        (t2f(0.100), "front at corner"),
-        (t2f(0.125), "front rotates"),
-        (t2f(0.250), "front on ceiling"),
-        (t2f(0.300), "both moving"),
-        (t2f(0.640), "back at corner"),
-        (t2f(0.665), "back rotates"),
-        (t2f(0.790), "back on ceiling"),
+        (t2f(_WTC_T_APPROACH),        "front at corner"),
+        (t2f(_WTC_T_APPROACH + 0.025), "front rotates"),
+        (t2f(_WTC_T_ROT_END),          "front on ceiling"),
+        (t2f(_WTC_T_SLIDE_0),           "both moving"),
+        (t2f(_WTC_T_SLIDE_END),        "back at corner"),
+        (t2f(_WTC_T_SLIDE_END + 0.025), "back rotates"),
+        (t2f(_WTC_T_SLIDE_END + 6*_WTC_ROT_DT), "back on ceiling"),
     ]
 
 elif SCENARIO == "outside":
@@ -109,14 +111,13 @@ elif SCENARIO == "outside":
     def formula_B(w, wp): return -(w[1] - wp[1]) / R     # ext-wall: down  = +CCW
 
     PHASES = [
-        (t2f(0.290), "front arrives"),
-        (t2f(0.315), "front rotates"),
-        (t2f(0.465), "front on wall"),
-        (t2f(0.490), "back starts"),
-        (t2f(0.670), "back arrives"),
-        (t2f(0.695), "back rotates"),
-        (t2f(0.845), "back on wall"),
-        (t2f(0.870), "both descend"),
+        (t2f(_OUT_T_FRONT_STOP),          "front arrives"),
+        (t2f(_OUT_T_ROT1_S),              "front rotates"),
+        (t2f(_OUT_T_ROT1_E),              "front on wall"),
+        (t2f(_OUT_T_BOTH_S),              "back starts"),
+        (t2f(_OUT_T_BACK_ARR),            "back arrives"),
+        (t2f(_OUT_T_BACK_ARR + 0.025),    "back rotates"),
+        (t2f(_OUT_T_ROT2_E),              "back on wall"),
     ]
 
 elif SCENARIO == "thin_edge":
@@ -131,11 +132,11 @@ elif SCENARIO == "thin_edge":
 
     PHASES = [
         (t2f(0.200), "red stops"),
-        (t2f(0.225), "red pivots"),
-        (t2f(0.500), "red done"),
-        (t2f(0.595), "green stops"),
-        (t2f(0.620), "green pivots"),
-        (t2f(0.895), "green done"),
+        (t2f(0.232), "red pivots"),
+        (t2f(0.521), "red done"),
+        (t2f(0.616), "green stops"),
+        (t2f(0.641), "green pivots"),
+        (t2f(0.941), "green done"),
     ]
 
 # ── Solve trajectory ─────────────────────────────────────────────────────────
@@ -155,7 +156,10 @@ x2  = np.array([r[1]["x2"]     for r in results])
 y2  = np.array([r[1]["y2"]     for r in results])
 th1 = np.array([r[2]["theta1"] for r in results])
 th2 = np.array([r[2]["theta2"] for r in results])
-qs  = np.degrees(np.array([r[0] for r in results]))   # (N_FRAMES, 4)
+from kinematics import q_display as _q_display
+_qs_raw = np.array([r[0] for r in results])                          # (N_FRAMES, 4)
+_qs_disp_rad = np.stack([_q_display(q) for q in _qs_raw])            # (N_FRAMES, 4) radians
+qs = np.degrees(np.unwrap(_qs_disp_rad, axis=0))                     # unwrap to remove ±180° wrap artefacts
 
 # ── Wheel centers ─────────────────────────────────────────────────────────────
 wl1 = np.array([wheel_centers(x1[i], y1[i], th1[i], wg, side= 1)[0] for i in range(N_FRAMES)])
@@ -188,8 +192,8 @@ omega_br = compute_omega(wr2)   # back-right  (assembly 2)
 
 # ── Plot ──────────────────────────────────────────────────────────────────────
 frames = np.arange(1, N_FRAMES + 1)
-fig, (ax, ax2) = plt.subplots(2, 1, figsize=(14, 9), sharex=True,
-                               gridspec_kw={"height_ratios": [1, 1]})
+fig, (ax, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 12), sharex=True,
+                                    gridspec_kw={"height_ratios": [1, 1, 1]})
 fig.suptitle(TITLE, fontsize=13, y=0.98)
 
 ax.plot(frames, omega_fl, label="Front-left",  color="#1f77b4", lw=1.8)
@@ -199,8 +203,10 @@ ax.plot(frames, omega_bl, label="Back-left",   color="#d62728", lw=1.8)
 ax.plot(frames, omega_br, label="Back-right",  color="#d62728", lw=1.8,
         linestyle="--", dashes=(6, 3))
 ax.axhline(0, color="black", lw=0.6, linestyle=":")
-ax.axhline( 0.70, color="orange", lw=0.8, linestyle="--", alpha=0.6, label="ω limit ±0.70")
-ax.axhline(-0.70, color="orange", lw=0.8, linestyle="--", alpha=0.6)
+_OMEGA_LIMIT = 30 * np.radians(7.5)    # 30× 7.5°/fr joint limit  ≈ 3.927 rad/frame
+ax.axhline( _OMEGA_LIMIT, color="orange", lw=0.8, linestyle="--", alpha=0.6,
+            label=f"ω limit ±{_OMEGA_LIMIT:.3f}")
+ax.axhline(-_OMEGA_LIMIT, color="orange", lw=0.8, linestyle="--", alpha=0.6)
 ax.set_ylabel("Angular velocity  (rad / frame)", fontsize=10)
 ax.set_xlim(1, N_FRAMES)
 ax.xaxis.set_major_locator(ticker.MultipleLocator(10))
@@ -212,18 +218,30 @@ q_colors = ["#2ca02c", "#ff7f0e", "#9467bd", "#8c564b"]
 for i, (name, col) in enumerate(zip(["q1", "q2", "q3", "q4"], q_colors)):
     ax2.plot(frames, qs[:, i], label=name, color=col, lw=1.8)
 ax2.axhline(  0, color="black", lw=0.5, linestyle=":")
-ax2.axhline( 135, color="red",  lw=0.8, linestyle="--", alpha=0.5, label="+135° limit")
-ax2.axhline(-135, color="red",  lw=0.8, linestyle="--", alpha=0.5)
+ax2.axhline(  90, color="red",  lw=0.8, linestyle="--", alpha=0.5, label="+90° limit")
+ax2.axhline( -90, color="red",  lw=0.8, linestyle="--", alpha=0.5)
 ax2.set_ylabel("Joint angle  (°)", fontsize=10)
-ax2.set_xlabel("Frame", fontsize=10)
 ax2.legend(loc="upper right", fontsize=9, ncol=3)
 ax2.grid(axis="y", alpha=0.3)
+
+_DJOINT_LIM = 7.5    # °/frame joint limit
+dqs = np.diff(qs, axis=0, prepend=qs[[0]])   # dqs[0]=0; dqs[i]=qs[i]−qs[i−1]
+for i, (name, col) in enumerate(zip(["q1", "q2", "q3", "q4"], q_colors)):
+    ax3.plot(frames, dqs[:, i], label=name, color=col, lw=1.8)
+ax3.axhline(0, color="black", lw=0.5, linestyle=":")
+ax3.axhline( _DJOINT_LIM, color="red", lw=0.8, linestyle="--", alpha=0.5,
+             label=f"±{_DJOINT_LIM:.2f}°/fr limit")
+ax3.axhline(-_DJOINT_LIM, color="red", lw=0.8, linestyle="--", alpha=0.5)
+ax3.set_ylabel("Δ Joint angle  (°/frame)", fontsize=10)
+ax3.set_xlabel("Frame", fontsize=10)
+ax3.legend(loc="upper left", fontsize=9, ncol=3)
+ax3.grid(axis="y", alpha=0.3)
 
 fig.tight_layout(rect=[0, 0, 1, 0.97])
 
 for f, label in PHASES:
     if 1 <= f <= N_FRAMES:
-        for a in (ax, ax2):
+        for a in (ax, ax2, ax3):
             a.axvline(f, color="gray", lw=0.8, linestyle=":")
         yhi = ax.get_ylim()[1]
         ax.text(f + 0.4, yhi * 0.97, label,

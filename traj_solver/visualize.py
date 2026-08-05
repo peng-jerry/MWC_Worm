@@ -4,7 +4,7 @@ Matplotlib visualization of the robot configuration.
 
 import numpy as np
 import matplotlib.pyplot as plt
-from kinematics import forward_kinematics
+from kinematics import forward_kinematics, q_display as _q_display
 
 
 def plot_robot(
@@ -15,10 +15,9 @@ def plot_robot(
     axle_half_length=0.140,
     axle_a_len=None,
     wheel_radius=0.050,
-    calf=0.042,
-    thigh=0.140,
-    arm_a1=0.0, arm_b1=np.pi / 4,
-    arm_a2=0.0, arm_b2=-np.pi / 4,
+    calf=0.0921,
+    arm_a1=0.0, arm_b1=np.arccos(0.79382),
+    arm_a2=0.0, arm_b2=-np.arccos(0.79382),
     ax=None,
     title=None,
 ):
@@ -60,11 +59,12 @@ def plot_robot(
         zorder=3, label="Linkage",
     )
 
-    # Joint labels and angle annotations
+    # Joint labels — q1/q4 displayed in calf-up convention (0° = link straight up from calf)
+    q_disp = _q_display(q)
     joint_names = ["q1", "q2", "q3", "q4"]
     for i, (pos, name) in enumerate(zip(positions, joint_names)):
         ax.annotate(
-            f"{name}={np.degrees(q[i]):.1f}°",
+            f"{name}={np.degrees(q_disp[i]):.1f}°",
             xy=pos, xytext=(8, 8), textcoords="offset points",
             fontsize=8, color="steelblue",
         )
@@ -83,18 +83,18 @@ def plot_robot(
     # --- Front and back assemblies (drawn at the actual q1 / q4 positions) ---
     _draw_assembly(ax, positions[0], theta1, axle_half_length, wheel_radius,
                    color="forestgreen", label="Front assembly",
-                   calf=calf, thigh=thigh, side=1, arm_a=arm_a1, arm_b=arm_b1,
+                   calf=calf, side=1, arm_a=arm_a1, arm_b=arm_b1,
                    bar_len_a=_bar_a)
     _draw_assembly(ax, positions[-1], theta_end, axle_half_length, wheel_radius,
                    color="crimson", label="Back assembly",
-                   calf=calf, thigh=thigh, side=-1, arm_a=arm_a2, arm_b=arm_b2,
+                   calf=calf, side=-1, arm_a=arm_a2, arm_b=arm_b2,
                    bar_len_a=_bar_a)
 
     ax.set_aspect("equal")
     ax.grid(True, alpha=0.3, linestyle="--")
     ax.legend(loc="upper left", fontsize=9)
 
-    q_str = ", ".join(f"{np.degrees(qi):.1f}°" for qi in q)
+    q_str = ", ".join(f"{np.degrees(qi):.1f}°" for qi in q_disp)
     if title is None:
         title = f"Robot IK solution\n[q1, q2, q3, q4] = [{q_str}]"
     ax.set_title(title, fontsize=10)
@@ -105,11 +105,11 @@ def plot_robot(
 
 
 def _draw_assembly(ax, joint_pos, theta, bar_len, wheel_r, color, label,
-                   arm_a=0.0, arm_b=np.pi / 4,
-                   calf=0.042, thigh=0.08951, side=1, bar_len_a=None):
+                   arm_a=0.0, arm_b=np.arccos(0.79382),
+                   calf=0.0921, side=1, bar_len_a=None):
     """
-    Draw one wheel assembly: L-bracket (thigh + calf) from chain joint to
-    V-apex, then two arms from V-apex to each wheel.
+    Draw one wheel assembly: calf strut from chain joint to V-apex,
+    then two arms from V-apex to each wheel.
 
     joint_pos : (x, y) of the chain joint (q1 or q4)
     theta     : assembly orientation (forward direction)
@@ -119,12 +119,8 @@ def _draw_assembly(ax, joint_pos, theta, bar_len, wheel_r, color, label,
     joint = np.asarray(joint_pos, dtype=float)
 
     v_apex = joint + np.array([
-        -side * thigh * np.cos(theta) + calf * np.sin(theta),
-        -side * thigh * np.sin(theta) - calf * np.cos(theta),
-    ])
-    elbow = joint + np.array([
-        -side * thigh * np.cos(theta),
-        -side * thigh * np.sin(theta),
+        calf * np.sin(theta),
+        -calf * np.cos(theta),
     ])
 
     center = theta - np.pi / 2
@@ -134,11 +130,9 @@ def _draw_assembly(ax, joint_pos, theta, bar_len, wheel_r, color, label,
     right_wheel = v_apex + bar_len * np.array([np.cos(center + arm_b),
                                                 np.sin(center + arm_b)])
 
-    # Thigh (joint → elbow) and calf (elbow → V-apex)
-    ax.plot([joint[0], elbow[0]], [joint[1], elbow[1]],
+    # Calf (joint → V-apex)
+    ax.plot([joint[0], v_apex[0]], [joint[1], v_apex[1]],
             "-", color=color, linewidth=2.0, zorder=2, label=label)
-    ax.plot([elbow[0], v_apex[0]], [elbow[1], v_apex[1]],
-            "-", color=color, linewidth=2.0, zorder=2)
 
     # Two arms from V-apex to each wheel
     ax.plot([v_apex[0], left_wheel[0]],  [v_apex[1], left_wheel[1]],

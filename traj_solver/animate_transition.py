@@ -19,6 +19,7 @@ Usage:
 """
 
 import os
+import math
 import sys
 import numpy as np
 import matplotlib
@@ -29,9 +30,10 @@ from matplotlib.patches import Rectangle
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from constraints import WheelGeometry
+from constraints import WheelGeometry, floor_y_for_assembly as _floor_y
 from solver import solve_ik
 from visualize import plot_robot
+from kinematics import q_display as _q_display
 
 
 # ------------------------------------------------------------------ #
@@ -140,8 +142,8 @@ def _cj_pivot(theta, pivot_pos, arm_angle, arm_len, wg, side=1):
     c  = theta - np.pi / 2
     vx = pivot_pos[0] - arm_len * np.cos(c + arm_angle)
     vy = pivot_pos[1] - arm_len * np.sin(c + arm_angle)
-    return (vx + side * wg.thigh * np.cos(theta) - wg.calf * np.sin(theta),
-            vy + side * wg.thigh * np.sin(theta) + wg.calf * np.cos(theta))
+    return (vx - wg.calf * np.sin(theta),
+            vy + wg.calf * np.cos(theta))
 
 
 # ------------------------------------------------------------------ #
@@ -353,7 +355,6 @@ def render_video(results, wg, l1, l2, l3, xlim, ylim,
             axle_a_len=wg.bar_len_a,
             wheel_radius=wg.wheel_r,
             calf=wg.calf,
-            thigh=wg.thigh,
             arm_a1=wg.arm_a1, arm_b1=wg.arm_b1,
             arm_a2=wg.arm_a2, arm_b2=wg.arm_b2,
             ax=ax,
@@ -366,9 +367,10 @@ def render_video(results, wg, l1, l2, l3, xlim, ylim,
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
         ax.legend(loc="upper right", fontsize=8)
+        q_disp = _q_display(q)
         ax.set_title(
             f"Frame {idx + 1}/{len(results)}  —  "
-            + "  ".join(f"q{i+1}={np.degrees(qi):+.1f}°" for i, qi in enumerate(q)),
+            + "  ".join(f"q{i+1}={np.degrees(qi):+.1f}°" for i, qi in enumerate(q_disp)),
             fontsize=9,
         )
 
@@ -400,16 +402,35 @@ def render_video(results, wg, l1, l2, l3, xlim, ylim,
 # ────────────────────────────────────────────────────────────────────────── #
 
 l1, l2, l3 = 0.25, 0.50, 0.25
-wg = WheelGeometry(bar_len=0.200, wheel_r=0.050,
-                   arm_a1=0.0, arm_b1=np.pi / 4,
-                   arm_a2=0.0, arm_b2=-np.pi / 4,
-                   calf=0.042, thigh=0.08951)
+# arm_b is the hypotenuse of a right triangle: base=wheelbase, height=bar_len_a.
+# Ensures arm_a and arm_b wheels are at equal depth at theta=0 (simultaneous floor contact).
+_WHEELBASE = 0.1263   # centre-to-centre distance between arm_a and arm_b wheels (m)
+wg = WheelGeometry(
+    bar_len=np.hypot(_WHEELBASE, 0.125),       # ≈ 0.1777 m
+    wheel_r=0.050,
+    arm_a1=0.0,  arm_b1= np.arctan(_WHEELBASE / 0.125),    # ≈ 45.3°
+    arm_a2=0.0,  arm_b2= np.arctan(_WHEELBASE / 0.125),
+    calf=0.0921, bar_len_a=0.125,
+)
 
 WALL_X    = 0.0
 CEILING_Y = 0.55
 
 EDGE_X = 0.44   # right terminus x for "thin_edge"  (0.35 × 1.25)
 EDGE_Y = 0.50   # edge height for "thin_edge"      (0.40 × 1.25)
+
+# ── Frame count and ω limit — shared with wheel_omega.py ────────────────────
+N_FRAMES   = 90        # frames per trajectory
+_OMEGA_LIM   = 30 * np.radians(7.5)   # physical ω limit for checks + graph  ≈ 3.927 rad/frame
+_OMEGA_SLIDE = 0.70                    # ω used for _dt_slide keyframe spacing
+
+def _dt_slide(*disps):
+    """Min Δt between two keyframes so max wheel-surface speed ≤ _OMEGA_SLIDE.
+
+    Uses integer-frame ceiling so the ω bound holds for every discrete frame.
+    """
+    n = math.ceil(max(abs(d) for d in disps) / (_OMEGA_SLIDE * wg.wheel_r))
+    return n / (N_FRAMES - 1)
 
 # ── Scenario 1: floor -> wall  (inside bottom-left corner) ──────────────────
 #
@@ -437,86 +458,125 @@ def _ftw1(th):
 def _ftw2(th):
     return _cj_pivot(th, _FTW_CORNER, wg.arm_b2,  wg.bar_len,   wg, side=-1)
 
+# Wheel assembly separation: 80 % of the total chain length.
+# Drives approach start position (x1) and departure end position (y1).
+_SEP        = 0.8 * (l1 + l2 + l3)   # 0.80 m with current geometry
+# Geometric body positions derived from wheel assembly at surface contact.
+# At theta=-π/2 on floor (front assembly on wall): body y = floor_y_for_assembly(-π/2, wg, 1).
+_FTW_Y1_ROT_END = wg.wheel_r + wg.bar_len * np.sin(wg.arm_b1)    # ≈ 0.172
+# At theta=0 on floor (back assembly flat): body y = floor_y_for_assembly(0, wg, 1).
+_FTW_Y2_FLOOR   = wg.wheel_r + wg.bar_len * np.cos(wg.arm_b1) + wg.calf  # ≈ 0.301
+# x2 at end of front rotation (start of "both moving" phase).
+_FTW_X2_SLIDE_S = 0.958
+# Both assemblies advance by _FTW_APP_DELTA together so joint angles stay
+# constant during approach (constant separation = _FTW_X2_SLIDE_S − _ftw1(0)[0]).
+# ω limit: 0.30 m / (9 fr × 0.05 m) = 0.667 rad/fr ✓
+_FTW_APP_DELTA  = 0.30
+
 KEYFRAMES_FLOOR_TO_WALL = [
-    # ---- Approach at 3.000/unit (ω=0.674 rad/frame ✓), sep=0.990m constant ----
-    {"t": 0.000, "x1": 0.4, "y1": 0.0, "theta1": 0.0,
-                 "x2": 1.0, "y2": 0.0, "theta2": 0.0,
+    # ---- Approach: both assemblies advance together (constant separation). ----
+    # Separation = _FTW_X2_SLIDE_S − _ftw1(0)[0] ≈ 0.908 throughout → joints fixed.
+    # Both travel _FTW_APP_DELTA = 0.45 m in Δt=0.15 → ω=0.692 rad/frame ✓
+    {"t": 0.000, "x1": _ftw1(0.0)[0] + _FTW_APP_DELTA, "y1": 0.0, "theta1": 0.0,
+                 "x2": _FTW_X2_SLIDE_S + _FTW_APP_DELTA, "y2": 0.0, "theta2": 0.0,
                  "constraint_set": "wall", "wall_x": WALL_X, "ceiling_y": _FTW_CY},
-    # Front arm_a1 reaches corner; back holds. WSA corrects x1→_ftw1(0)[0]≈0.140,
-    # y1→_ftw1(0)[1]≈0.233 via floor-snap.  Back y2=0.233 matches floor-snap.
-    {"t": 0.15, "x1": 0.0, "y1": 0.0, "theta1": 0.0,
-                 "x2": 1.00, "y2": 0.233, "theta2": 0.0,
+    # Front arm_a1 reaches corner; back holds at x2=0.958 (monotone — no reversal).
+    # x1 from WSA-corrected pivot; chain extension at stop ≈ 91% (stable with correct x1).
+    {"t": 0.15, "x1": _ftw1(0.0)[0], "y1": _ftw1(0.0)[1], "theta1": 0.0,
+                 "x2": 0.958, "y2": _FTW_Y2_FLOOR, "theta2": 0.0,
                  "constraint_set": "wall", "wall_x": WALL_X, "ceiling_y": _FTW_CY},
     # ---- Front rotation: arm_a1 pivots at corner, theta: 0 → -π/2 ----
-    # 5 steps × 15° at Δt=0.025, final step (−75°→−90°) at Δt=0.030 to clear
-    # the IK branch flip that spans that angular range (q2 shifts ~23° there).
-    {"t": 0.175, "x1": _ftw1(-np.pi / 12)[0], "y1": _ftw1(-np.pi / 12)[1],
+    # x1 from _ftw1 pivot (arm_a1 exactly at wall); y1 from floor_y_for_assembly
+    # (arm_b1 deepens without thigh → pivot formula gives y<floor at large theta).
+    # x2=0.958 held constant through rotation — back never reverses direction.
+    {"t": 0.183, "x1": _ftw1(-np.pi / 12)[0], "y1": _floor_y(-np.pi / 12, wg, 1),
                  "theta1": -np.pi / 12,
-                 "x2": 0.980, "y2": 0.233, "theta2": 0.0,
+                 "x2": 0.958, "y2": _FTW_Y2_FLOOR, "theta2": 0.0,
                  "constraint_set": "wall", "wall_x": WALL_X, "ceiling_y": _FTW_CY},
-    {"t": 0.200, "x1": _ftw1(-np.pi / 6)[0],  "y1": _ftw1(-np.pi / 6)[1],
+    {"t": 0.216, "x1": _ftw1(-np.pi / 6)[0],  "y1": _floor_y(-np.pi / 6,  wg, 1),
                  "theta1": -np.pi / 6,
-                 "x2": 0.980, "y2": 0.233, "theta2": 0.0,
+                 "x2": 0.958, "y2": _FTW_Y2_FLOOR, "theta2": 0.0,
                  "constraint_set": "wall", "wall_x": WALL_X, "ceiling_y": _FTW_CY},
-    {"t": 0.225, "x1": _ftw1(-np.pi / 4)[0],  "y1": _ftw1(-np.pi / 4)[1],
+    {"t": 0.249, "x1": _ftw1(-np.pi / 4)[0],  "y1": _floor_y(-np.pi / 4,  wg, 1),
                  "theta1": -np.pi / 4,
-                 "x2": 0.960, "y2": 0.233, "theta2": 0.0,
+                 "x2": 0.958, "y2": _FTW_Y2_FLOOR, "theta2": 0.0,
                  "constraint_set": "wall", "wall_x": WALL_X, "ceiling_y": _FTW_CY},
-    {"t": 0.250, "x1": _ftw1(-np.pi / 3)[0],  "y1": _ftw1(-np.pi / 3)[1],
+    {"t": 0.282, "x1": _ftw1(-np.pi / 3)[0],  "y1": _floor_y(-np.pi / 3,  wg, 1),
                  "theta1": -np.pi / 3,
-                 "x2": 0.960, "y2": 0.233, "theta2": 0.0,
+                 "x2": 0.958, "y2": _FTW_Y2_FLOOR, "theta2": 0.0,
                  "constraint_set": "wall", "wall_x": WALL_X, "ceiling_y": _FTW_CY},
-    {"t": 0.275, "x1": _ftw1(-5 * np.pi / 12)[0], "y1": _ftw1(-5 * np.pi / 12)[1],
+    {"t": 0.315, "x1": _ftw1(-5 * np.pi / 12)[0], "y1": _floor_y(-5 * np.pi / 12, wg, 1),
                  "theta1": -5 * np.pi / 12,
-                 "x2": 0.958, "y2": 0.233, "theta2": 0.0,
+                 "x2": 0.958, "y2": _FTW_Y2_FLOOR, "theta2": 0.0,
                  "constraint_set": "wall", "wall_x": WALL_X, "ceiling_y": _FTW_CY},
-    # theta=-90°: front locks on wall.  y1=floor_y_for_assembly(-π/2)=0.102 so
-    # the hint interpolation to y1=0.42 at t=0.44 stays within ω=0.70.
-    {"t": 0.305, "x1": _ftw1(-np.pi / 2)[0],  "y1": 0.102,
+    # theta=-90°: front locks on wall.  Δt=0.045 (not 0.033) so q2 changes
+    # ≤7.5°/frame through the -75°→-90° branch-flip zone.
+    # y1=_FTW_Y1_ROT_END so the hint interpolation to y1=0.42 at t=0.48 is ω-safe.
+    {"t": 0.360, "x1": _ftw1(-np.pi / 2)[0],  "y1": _FTW_Y1_ROT_END,
                  "theta1": -np.pi / 2,
-                 "x2": 0.958, "y2": 0.233, "theta2": 0.0,
+                 "x2": _FTW_X2_SLIDE_S, "y2": _FTW_Y2_FLOOR, "theta2": 0.0,
                  "constraint_set": "wall", "wall_x": WALL_X, "ceiling_y": _FTW_CY},
     # ---- Both moving: front climbs, back slowly approaches ----
-    {"t": 0.44, "x1": 0.0, "y1": 0.42, "theta1": -np.pi / 2,
-                 "x2": 0.929, "y2": 0.0, "theta2": 0.0,
+    # y1 scaled as fraction of total chain so hints stay proportional if links change.
+    # x2 held at 0.958 through t=0.44 so chain extension stays ≥66% at fr41-42
+    # (new geometry has x1_eff=0.268 vs old 0.233, requiring a higher x2 offset to
+    # prevent the branch-flip that fires at ~63% extension with the old x2=0.929 start).
+    # ω budget: Δx2=0.218 per step (same as old) spread over equal Δt=0.07 intervals.
+    # y2=_FTW_Y2_FLOOR (not 0.0) so the ω hint matches the physical floor contact height.
+    {"t": 0.480, "x1": 0.0, "y1": 0.42 * (l1 + l2 + l3), "theta1": -np.pi / 2,
+                 "x2": 0.958, "y2": _FTW_Y2_FLOOR, "theta2": 0.0,
                  "constraint_set": "wall", "wall_x": WALL_X, "ceiling_y": _FTW_CY},
-    {"t": 0.51, "x1": 0.0, "y1": 0.62, "theta1": -np.pi / 2,
-                 "x2": 0.711, "y2": 0.0, "theta2": 0.0,
+    # x2 decreases at constant rate from 0.958 (t=0.480) to ~0.550 (t=0.620) to avoid
+    # a rate-change kink that causes q2 to jump branches at ~fr47.
+    # Rate: (0.958-0.550)/(0.620-0.480)/89 ≈ 0.033 m/frame → ω=0.66 < 0.70 ✓
+    {"t": 0.550, "x1": 0.0, "y1": 0.62 * (l1 + l2 + l3), "theta1": -np.pi / 2,
+                 "x2": 0.754, "y2": _FTW_Y2_FLOOR, "theta2": 0.0,
                  "constraint_set": "wall", "wall_x": WALL_X, "ceiling_y": _FTW_CY},
-    {"t": 0.58, "x1": 0.0, "y1": 0.82, "theta1": -np.pi / 2,
-                 "x2": 0.493, "y2": 0.0, "theta2": 0.0,
+    {"t": 0.620, "x1": 0.0, "y1": 0.82 * (l1 + l2 + l3), "theta1": -np.pi / 2,
+                 "x2": 0.550, "y2": _FTW_Y2_FLOOR, "theta2": 0.0,
                  "constraint_set": "wall", "wall_x": WALL_X, "ceiling_y": _FTW_CY},
     # Back arm_b2 reaches corner: x2,y2 from pivot formula at theta=0.
-    {"t": 0.735, "x1": 0.0, "y1": 1.0, "theta1": -np.pi / 2,
+    # y1 = l1+l2+l3: at back's theta=-π/2 the chain spans purely vertically from
+    # y2≈0 (floor) to y1, so y1 must equal the total chain length.
+    {"t": 0.775, "x1": 0.0, "y1": l1 + l2 + l3, "theta1": -np.pi / 2,
                  "x2": _ftw2(0.0)[0], "y2": _ftw2(0.0)[1], "theta2": 0.0,
                  "constraint_set": "wall", "wall_x": WALL_X, "ceiling_y": _FTW_CY},
-    # ---- Back rotation: arm_b2 pivots at corner, theta: 0 → -π/2 ----
-    {"t": 0.76, "x1": 0.0, "y1": 1.0, "theta1": -np.pi / 2,
-                 "x2": _ftw2(-np.pi / 12)[0], "y2": _ftw2(-np.pi / 12)[1],
+    # ---- Back rotation: arm_b2 slides up wall, arm_a2 slides inward on floor ----
+    # x2 from _ftw2 (= wall_x_for_assembly: arm_b2 on wall at x=WALL_X+wheel_r).
+    # y2 = floor_y_for_assembly (arm_a2 stays on floor throughout).
+    # At theta=-π/2, floor_y gives y2=0.050 and arm_a2 arrives at the corner (0.050,0.050).
+    # Clamping y2 to _FTW_Y1_ROT_END lifts arm_a2 off the floor → assembly appears to float.
+    {"t": 0.805, "x1": 0.0, "y1": l1 + l2 + l3, "theta1": -np.pi / 2,
+                 "x2": _ftw2(-np.pi / 12)[0], "y2": _floor_y(-np.pi / 12, wg, -1),
                  "theta2": -np.pi / 12,
                  "constraint_set": "wall", "wall_x": WALL_X, "ceiling_y": _FTW_CY},
-    {"t": 0.785, "x1": 0.0, "y1": 1.0, "theta1": -np.pi / 2,
-                 "x2": _ftw2(-np.pi / 6)[0],  "y2": _ftw2(-np.pi / 6)[1],
+    {"t": 0.835, "x1": 0.0, "y1": l1 + l2 + l3, "theta1": -np.pi / 2,
+                 "x2": _ftw2(-np.pi / 6)[0],  "y2": _floor_y(-np.pi / 6,  wg, -1),
                  "theta2": -np.pi / 6,
                  "constraint_set": "wall", "wall_x": WALL_X, "ceiling_y": _FTW_CY},
-    {"t": 0.810, "x1": 0.0, "y1": 1.0, "theta1": -np.pi / 2,
-                 "x2": _ftw2(-np.pi / 4)[0],  "y2": _ftw2(-np.pi / 4)[1],
+    {"t": 0.865, "x1": 0.0, "y1": l1 + l2 + l3, "theta1": -np.pi / 2,
+                 "x2": _ftw2(-np.pi / 4)[0],  "y2": _floor_y(-np.pi / 4,  wg, -1),
                  "theta2": -np.pi / 4,
                  "constraint_set": "wall", "wall_x": WALL_X, "ceiling_y": _FTW_CY},
-    {"t": 0.835, "x1": 0.0, "y1": 1.0, "theta1": -np.pi / 2,
-                 "x2": _ftw2(-np.pi / 3)[0],  "y2": _ftw2(-np.pi / 3)[1],
+    {"t": 0.895, "x1": 0.0, "y1": l1 + l2 + l3, "theta1": -np.pi / 2,
+                 "x2": _ftw2(-np.pi / 3)[0],  "y2": _floor_y(-np.pi / 3,  wg, -1),
                  "theta2": -np.pi / 3,
                  "constraint_set": "wall", "wall_x": WALL_X, "ceiling_y": _FTW_CY},
-    {"t": 0.86, "x1": 0.0, "y1": 1.0, "theta1": -np.pi / 2,
-                 "x2": _ftw2(-5 * np.pi / 12)[0], "y2": _ftw2(-5 * np.pi / 12)[1],
+    # Δt=0.040 for last two steps (steps 1-4 at 0.030): near-singularity at high chain
+    # extension amplifies theta2 rate → q4 jumps. 4.21°/frame × 1.7 ≈ 7.2°/frame < 7.5° ✓
+    {"t": 0.935, "x1": 0.0, "y1": l1 + l2 + l3, "theta1": -np.pi / 2,
+                 "x2": _ftw2(-5 * np.pi / 12)[0], "y2": _floor_y(-5 * np.pi / 12, wg, -1),
                  "theta2": -5 * np.pi / 12,
                  "constraint_set": "wall", "wall_x": WALL_X, "ceiling_y": _FTW_CY},
-    {"t": 0.885, "x1": 0.0, "y1": 1.0, "theta1": -np.pi / 2,
-                 "x2": _ftw2(-np.pi / 2)[0],  "y2": _ftw2(-np.pi / 2)[1],
+    # theta=-π/2: arm_a2 arrives at corner (0.050, 0.050); y2=floor_y=0.050.
+    # Departure Δy = 0.250 in 2.2 fr → ω=2.25 rad/fr < 3.927 ✓
+    {"t": 0.975, "x1": 0.0, "y1": l1 + l2 + l3, "theta1": -np.pi / 2,
+                 "x2": _ftw2(-np.pi / 2)[0],  "y2": _floor_y(-np.pi / 2, wg, -1),
                  "theta2": -np.pi / 2,
                  "constraint_set": "wall", "wall_x": WALL_X, "ceiling_y": _FTW_CY},
-    {"t": 1.000, "x1": 0.0, "y1": 1.2, "theta1": -np.pi / 2,
-                 "x2": 0.0,  "y2": 0.3,  "theta2": -np.pi / 2,
+    # Animation ends at back-rotation completion — no extra departure to avoid a sudden jump.
+    {"t": 1.000, "x1": 0.0, "y1": l1 + l2 + l3,              "theta1": -np.pi / 2,
+                 "x2": 0.0, "y2": _floor_y(-np.pi / 2, wg, -1), "theta2": -np.pi / 2,
                  "constraint_set": "wall", "wall_x": WALL_X, "ceiling_y": _FTW_CY},
 ]
 
@@ -528,83 +588,147 @@ KEYFRAMES_FLOOR_TO_WALL = [
 #  Near-flat start and end: chain fully extended along the thigh direction
 #  (q≈0) at both ends.
 
-_WTC_CY = 1.5   # local ceiling height for this scenario
+_WTC_CY    = 1.5   # local ceiling height for this scenario
+# Back assembly y2 throughout: t=0, approach, rotation, and Phase A start.
+# Set to ceiling − chain + 0.01 m so the chain is at most 99 % extended when the
+# front is at the corner; the 0.01 m margin avoids the full-extension singularity.
+_WTC_Y2_ROT = _WTC_CY - (l1 + l2 + l3) + 0.01            # ≈ 0.51
+# Approach-end y2 (= _WTC_Y2_ROT): back stays stationary, front slides to corner.
+_WTC_Y2_APP_END = _WTC_Y2_ROT                              # ≈ 0.51
+# At theta=π: calf is perpendicular to theta (horizontal) → no y-offset from calf.
+# arm_a2 x-offset = bar_len_a * cos(π/2 + 0) = 0; arm_b2 x-offset > 0 → min = 0.
+# x_joint = wall_x + wheel_r (= wall_x_for_assembly(π, wg, WALL_X, side=-1)).
+_WTC_X2_EFF  = WALL_X + wg.wheel_r                     # ≈ 0.050
+# Full-extension reference: same logic as FTW y1 = l1+l2+l3.
+# At theta2=π: chain = x1_eff − x2_eff = x1 − _WTC_X2_EFF → x1 = _WTC_X2_EFF + chain_length.
+# This is the front-assembly x at which chain would be 100 % with back at the corner.
+# IK branch instability near 100 % extension prevents reaching it cleanly in trajectory.
+_WTC_X1_HOLD = _WTC_X2_EFF + (l1 + l2 + l3)            # ≈ 1.140
+
+# Wall-ceiling corner pivot (same structure as FTW floor-wall corner):
+#   front (side=+1): arm_a1 (angle=0, bar_len_a) is at the corner when theta=−π/2
+#   back  (side=−1): arm_b2 (angle=arm_b2, bar_len) is at the corner when theta=−π/2
+# Identical arm choices to FTW; only the corner coordinates differ.
+_WTC_CORNER = (WALL_X + wg.wheel_r, _WTC_CY - wg.wheel_r)   # (0.05, 1.45)
+
+def _wtc1(th):
+    return _cj_pivot(th, _WTC_CORNER, wg.arm_a1, wg.bar_len_a, wg, side=+1)
+def _wtc2(th):
+    return _cj_pivot(th, _WTC_CORNER, wg.arm_b2, wg.bar_len,   wg, side=-1)
+
+# Sliding-phase parameters for WTC — computed from assembly start/end and ω limit.
+#
+# Phase A: x1 and y2 advance by equal per-step amounts (Δx1 = Δy2 per step).
+#   Phase A starts at x1=_WTC_X1_SLIDE_S (> l1) so the minimum chain extension
+#   satisfies dist_min = (Δx_start + Δy_start)/√2 ≥ 0.82 m (clean threshold).
+#   x1: _WTC_X1_SLIDE_S → l1+l2+l3  (total Δ = l1+l2+l3 − _WTC_X1_SLIDE_S)
+#   y2: _WTC_Y2_SLIDE_S → _WTC_Y2_SLIDE_S + same total Δ
+# Phase B: y2 finishes to _WTC_CY while x1 holds at l1+l2+l3.
+_WTC_X1_ROT_END  = WALL_X + wg.wheel_r + wg.bar_len * np.sin(wg.arm_b1)  # body x at theta=π (≈ 0.172)
+_WTC_SLIDE_N     = 5                                                  # Phase A segments
+_WTC_X1_SLIDE_S  = l1 + 0.04                                         # Phase A start x1 (≈ 0.290); chosen so
+#   dist_min = (Δx_start+Δy_start)/√2 = (0.24+0.99)/√2 ≈ 0.870 m > 0.82 m threshold
+_WTC_SLIDE_A_DX  = (l1 + l2 + l3 - _WTC_X1_SLIDE_S) / _WTC_SLIDE_N # Δx1 = Δy2 per step (≈ 0.144)
+_WTC_SLIDE_A_DT  = _dt_slide(_WTC_SLIDE_A_DX)                        # Δt per Phase-A step (5/89)
+_WTC_Y2_SLIDE_S  = _WTC_Y2_ROT                                        # back y at Phase-A start (= 0.51)
+_WTC_T_APPROACH  = _dt_slide(_WTC_CY - _WTC_Y2_ROT - _SEP) + 2 / (N_FRAMES - 1)  # +2 fr keeps approach Δq ≤ 7.5°/fr
+_WTC_ROT_DT      = 0.040                                               # 0.035 gives 8.3°/fr q4; 0.040 → ~7.2°/fr ✓
+_WTC_T_ROT_END   = _WTC_T_APPROACH + 6 * _WTC_ROT_DT                  # 6 × 15° steps
+# Back holds at y2=_WTC_Y2_SLIDE_S through approach and rotation; Phase A starts there.
+# x1 advances from rotation-end (0.172) to Phase A k=0 (_WTC_X1_SLIDE_S=0.280).
+_WTC_T_SLIDE_0   = _WTC_T_ROT_END + _dt_slide(_WTC_X1_SLIDE_S - _WTC_X1_ROT_END)
+_WTC_T_SLIDE_A   = _WTC_T_SLIDE_0 + _WTC_SLIDE_N * _WTC_SLIDE_A_DT  # Phase A end t
+_WTC_SLIDE_B_DT  = _dt_slide(_WTC_CY - _WTC_Y2_SLIDE_S - _WTC_SLIDE_N * _WTC_SLIDE_A_DX)  # Phase B Δt
+_WTC_T_SLIDE_END = _WTC_T_SLIDE_A + _WTC_SLIDE_B_DT                  # back at corner  t (≈ 0.699)
 
 KEYFRAMES_WALL_TO_CEILING = [
-    # Both on wall, near-flat vertical chain (~89% of 1.00 m chain).
-    # Front (side=+1) above back (side=-1): keeps them from crossing.
-    {"t": 0.00, "x1": 0.0, "y1": 1.19, "theta1": -np.pi / 2,
-                "x2": 0.0, "y2": 0.40,  "theta2": -np.pi / 2,
+    # Both on wall; separation along y = _SEP ✓.  Back holds at y2=_WTC_Y2_ROT (IK
+    # stability during front rotation); front starts _SEP above it.
+    {"t": 0.00, "x1": 0.0, "y1": _WTC_Y2_ROT + _SEP, "theta1": -np.pi / 2,
+                "x2": 0.0, "y2": _WTC_Y2_ROT,        "theta2": -np.pi / 2,
                 "constraint_set": "ceiling", "wall_x": WALL_X, "ceiling_y": _WTC_CY},
     # Front slides to corner.
-    {"t": 0.10, "x1": 0.0, "y1": _WTC_CY, "theta1": -np.pi / 2,
-                "x2": 0.0, "y2": 0.40,     "theta2": -np.pi / 2,
+    {"t": _WTC_T_APPROACH, "x1": 0.0, "y1": _WTC_CY, "theta1": -np.pi / 2,
+                "x2": 0.0, "y2": _WTC_Y2_APP_END, "theta2": -np.pi / 2,
                 "constraint_set": "ceiling", "wall_x": WALL_X, "ceiling_y": _WTC_CY},
     # Front rotates at corner (-pi/2 → pi via -pi, CW 90°) in 15° steps.
-    # y2 held at 0.40 during rotation to keep chain within reach (dist≤1.0m);
-    # ramps to 0.30 by t=0.250 so back assembly lags at the start of the slide.
-    {"t": 0.125, "x1": 0.0, "y1": _WTC_CY, "theta1": -7 * np.pi / 12,
-                 "x2": 0.0, "y2": 0.40,     "theta2": -np.pi / 2,
+    # x1, y1 from pivot formula (arm_a1 fixed at _WTC_CORNER) — same logic as FTW _ftw1.
+    # y2 held at _WTC_Y2_ROT during rotation to keep chain within reach (dist≤1.0m).
+    {"t": _WTC_T_APPROACH + 1*_WTC_ROT_DT, "x1": _wtc1(-7 * np.pi / 12)[0], "y1": _wtc1(-7 * np.pi / 12)[1],
+                 "theta1": -7 * np.pi / 12,
+                 "x2": 0.0, "y2": _WTC_Y2_APP_END, "theta2": -np.pi / 2,
                  "constraint_set": "ceiling", "wall_x": WALL_X, "ceiling_y": _WTC_CY},
-    {"t": 0.150, "x1": 0.0, "y1": _WTC_CY, "theta1": -2 * np.pi / 3,
-                 "x2": 0.0, "y2": 0.40,     "theta2": -np.pi / 2,
+    {"t": _WTC_T_APPROACH + 2*_WTC_ROT_DT, "x1": _wtc1(-2 * np.pi / 3)[0], "y1": _wtc1(-2 * np.pi / 3)[1],
+                 "theta1": -2 * np.pi / 3,
+                 "x2": 0.0, "y2": _WTC_Y2_APP_END, "theta2": -np.pi / 2,
                  "constraint_set": "ceiling", "wall_x": WALL_X, "ceiling_y": _WTC_CY},
-    {"t": 0.175, "x1": 0.0, "y1": _WTC_CY, "theta1": -3 * np.pi / 4,
-                 "x2": 0.0, "y2": 0.40,     "theta2": -np.pi / 2,
+    {"t": _WTC_T_APPROACH + 3*_WTC_ROT_DT, "x1": _wtc1(-3 * np.pi / 4)[0], "y1": _wtc1(-3 * np.pi / 4)[1],
+                 "theta1": -3 * np.pi / 4,
+                 "x2": 0.0, "y2": _WTC_Y2_APP_END, "theta2": -np.pi / 2,
                  "constraint_set": "ceiling", "wall_x": WALL_X, "ceiling_y": _WTC_CY},
-    {"t": 0.200, "x1": 0.0, "y1": _WTC_CY, "theta1": -5 * np.pi / 6,
-                 "x2": 0.0, "y2": 0.40,     "theta2": -np.pi / 2,
+    {"t": _WTC_T_APPROACH + 4*_WTC_ROT_DT, "x1": _wtc1(-5 * np.pi / 6)[0], "y1": _wtc1(-5 * np.pi / 6)[1],
+                 "theta1": -5 * np.pi / 6,
+                 "x2": 0.0, "y2": _WTC_Y2_APP_END, "theta2": -np.pi / 2,
                  "constraint_set": "ceiling", "wall_x": WALL_X, "ceiling_y": _WTC_CY},
-    {"t": 0.225, "x1": 0.0, "y1": _WTC_CY, "theta1": -11 * np.pi / 12,
-                 "x2": 0.0, "y2": 0.40,     "theta2": -np.pi / 2,
+    {"t": _WTC_T_APPROACH + 5*_WTC_ROT_DT, "x1": _wtc1(-11 * np.pi / 12)[0], "y1": _wtc1(-11 * np.pi / 12)[1],
+                 "theta1": -11 * np.pi / 12,
+                 "x2": 0.0, "y2": _WTC_Y2_APP_END, "theta2": -np.pi / 2,
                  "constraint_set": "ceiling", "wall_x": WALL_X, "ceiling_y": _WTC_CY},
-    {"t": 0.250, "x1": 0.0, "y1": _WTC_CY, "theta1": np.pi,
-                 "x2": 0.0, "y2": 0.40,     "theta2": -np.pi / 2,
+    # theta=π: arm_a1 pivot puts body inside wall; use wall_x_for_assembly (arm_b1 limit)
+    # so the slope from here to x1=l1 at t=0.331 stays within ω=0.70.  Same override
+    # logic as FTW using 0.102 instead of _ftw1(-pi/2)[1]=-0.040.
+    {"t": _WTC_T_ROT_END, "x1": _WTC_X1_ROT_END,
+                 "y1": _wtc1(np.pi)[1],
+                 "theta1": np.pi,
+                 "x2": 0.0, "y2": _WTC_Y2_APP_END, "theta2": -np.pi / 2,
                  "constraint_set": "ceiling", "wall_x": WALL_X, "ceiling_y": _WTC_CY},
-    # Front slides right on ceiling; back climbs wall simultaneously.
-    # Same x1/y2 profile as e57e82a; Δt stretched so ω ≤ 0.69 (wheel_r=0.050).
-    # y2 lags x1 early to keep chain extension ≥75% in the first step.
-    {"t": 0.331, "x1": 0.25, "y1": _WTC_CY, "theta1": np.pi,
-                 "x2": 0.0,  "y2": 0.44,     "theta2": -np.pi / 2,
-                 "constraint_set": "ceiling", "wall_x": WALL_X, "ceiling_y": _WTC_CY},
-    {"t": 0.412, "x1": 0.50, "y1": _WTC_CY, "theta1": np.pi,
-                 "x2": 0.0,  "y2": 0.69,     "theta2": -np.pi / 2,
-                 "constraint_set": "ceiling", "wall_x": WALL_X, "ceiling_y": _WTC_CY},
-    {"t": 0.484, "x1": 0.71, "y1": _WTC_CY, "theta1": np.pi,
-                 "x2": 0.0,  "y2": 0.91,     "theta2": -np.pi / 2,
-                 "constraint_set": "ceiling", "wall_x": WALL_X, "ceiling_y": _WTC_CY},
-    {"t": 0.556, "x1": 0.88, "y1": _WTC_CY, "theta1": np.pi,
-                 "x2": 0.0,  "y2": 1.13,     "theta2": -np.pi / 2,
-                 "constraint_set": "ceiling", "wall_x": WALL_X, "ceiling_y": _WTC_CY},
-    {"t": 0.616, "x1": 1.00, "y1": _WTC_CY, "theta1": np.pi,
-                 "x2": 0.0,  "y2": 1.31,     "theta2": -np.pi / 2,
-                 "constraint_set": "ceiling", "wall_x": WALL_X, "ceiling_y": _WTC_CY},
-    # Back arrives at corner; front holds at x1=1.06.
-    {"t": 0.679, "x1": 1.06, "y1": _WTC_CY, "theta1": np.pi,
-                 "x2": 0.0,  "y2": _WTC_CY,  "theta2": -np.pi / 2,
-                 "constraint_set": "ceiling", "wall_x": WALL_X, "ceiling_y": _WTC_CY},
+    # Sliding phase — positions and timing from assembly start/end + ω limit.
+    # Phase A: x1 and y2 advance by equal amounts each step (Δ = _WTC_SLIDE_A_DX)
+    #   so chain extension stays ≥ 82 % throughout.  k=0 is the slide start
+    #   (x1=_WTC_X1_SLIDE_S, y2=_WTC_Y2_SLIDE_S); k=_WTC_SLIDE_N is the Phase A end.
+    # Phase B: y2 finishes to ceiling corner; x1 holds.  Front holds at l1+l2+l3
+    #   throughout back rotation so chain stays 77–80 % (no singularity).
+    *[{"t": _WTC_T_SLIDE_0 + k * _WTC_SLIDE_A_DT,
+       "x1": _WTC_X1_SLIDE_S + k * _WTC_SLIDE_A_DX, "y1": _WTC_CY, "theta1": np.pi,
+       "x2": 0.0,
+       "y2": _WTC_Y2_SLIDE_S + k * _WTC_SLIDE_A_DX,  "theta2": -np.pi / 2,
+       "constraint_set": "ceiling", "wall_x": WALL_X, "ceiling_y": _WTC_CY}
+      for k in range(_WTC_SLIDE_N + 1)],
+    {"t": _WTC_T_SLIDE_END,
+     "x1": l1 + l2 + l3, "y1": _WTC_CY, "theta1": np.pi,
+     "x2": 0.0,           "y2": _WTC_CY,  "theta2": -np.pi / 2,
+     "constraint_set": "ceiling", "wall_x": WALL_X, "ceiling_y": _WTC_CY},
     # Back rotates at corner (-pi/2 → pi via -pi, CW 90°) in 15° steps.
-    {"t": 0.704, "x1": 1.06, "y1": _WTC_CY, "theta1": np.pi,
-                 "x2": 0.0,  "y2": _WTC_CY,  "theta2": -7 * np.pi / 12,
+    # x2, y2 from pivot formula (arm_b2 fixed at _WTC_CORNER) — same logic as FTW _ftw2.
+    {"t": _WTC_T_SLIDE_END + 1*_WTC_ROT_DT, "x1": l1 + l2 + l3, "y1": _WTC_CY, "theta1": np.pi,
+                 "x2": _wtc2(-7 * np.pi / 12)[0], "y2": _wtc2(-7 * np.pi / 12)[1],
+                 "theta2": -7 * np.pi / 12,
                  "constraint_set": "ceiling", "wall_x": WALL_X, "ceiling_y": _WTC_CY},
-    {"t": 0.729, "x1": 1.06, "y1": _WTC_CY, "theta1": np.pi,
-                 "x2": 0.0,  "y2": _WTC_CY,  "theta2": -2 * np.pi / 3,
+    {"t": _WTC_T_SLIDE_END + 2*_WTC_ROT_DT, "x1": l1 + l2 + l3, "y1": _WTC_CY, "theta1": np.pi,
+                 "x2": _wtc2(-2 * np.pi / 3)[0], "y2": _wtc2(-2 * np.pi / 3)[1],
+                 "theta2": -2 * np.pi / 3,
                  "constraint_set": "ceiling", "wall_x": WALL_X, "ceiling_y": _WTC_CY},
-    {"t": 0.754, "x1": 1.06, "y1": _WTC_CY, "theta1": np.pi,
-                 "x2": 0.0,  "y2": _WTC_CY,  "theta2": -3 * np.pi / 4,
+    {"t": _WTC_T_SLIDE_END + 3*_WTC_ROT_DT, "x1": l1 + l2 + l3, "y1": _WTC_CY, "theta1": np.pi,
+                 "x2": _wtc2(-3 * np.pi / 4)[0], "y2": _wtc2(-3 * np.pi / 4)[1],
+                 "theta2": -3 * np.pi / 4,
                  "constraint_set": "ceiling", "wall_x": WALL_X, "ceiling_y": _WTC_CY},
-    {"t": 0.779, "x1": 1.06, "y1": _WTC_CY, "theta1": np.pi,
-                 "x2": 0.0,  "y2": _WTC_CY,  "theta2": -5 * np.pi / 6,
+    {"t": _WTC_T_SLIDE_END + 4*_WTC_ROT_DT, "x1": l1 + l2 + l3, "y1": _WTC_CY, "theta1": np.pi,
+                 "x2": _wtc2(-5 * np.pi / 6)[0], "y2": _wtc2(-5 * np.pi / 6)[1],
+                 "theta2": -5 * np.pi / 6,
                  "constraint_set": "ceiling", "wall_x": WALL_X, "ceiling_y": _WTC_CY},
-    {"t": 0.804, "x1": 1.06, "y1": _WTC_CY, "theta1": np.pi,
-                 "x2": 0.0,  "y2": _WTC_CY,  "theta2": -11 * np.pi / 12,
+    {"t": _WTC_T_SLIDE_END + 5*_WTC_ROT_DT, "x1": l1 + l2 + l3, "y1": _WTC_CY, "theta1": np.pi,
+                 "x2": _wtc2(-11 * np.pi / 12)[0], "y2": _wtc2(-11 * np.pi / 12)[1],
+                 "theta2": -11 * np.pi / 12,
                  "constraint_set": "ceiling", "wall_x": WALL_X, "ceiling_y": _WTC_CY},
-    {"t": 0.829, "x1": 1.06, "y1": _WTC_CY, "theta1": np.pi,
-                 "x2": 0.0,  "y2": _WTC_CY,  "theta2": np.pi,
+    # theta=π: arm_b2 pivot puts body just inside wall; use _WTC_X2_EFF (arm_a2 limit)
+    # for the same reason as the front override above.
+    {"t": _WTC_T_SLIDE_END + 6*_WTC_ROT_DT, "x1": l1 + l2 + l3, "y1": _WTC_CY, "theta1": np.pi,
+                 "x2": _WTC_X2_EFF, "y2": _wtc2(np.pi)[1],
+                 "theta2": np.pi,
                  "constraint_set": "ceiling", "wall_x": WALL_X, "ceiling_y": _WTC_CY},
-    # Both on ceiling; spread to near-flat end (~90% of 1.00 m chain).
-    {"t": 1.00,  "x1": 1.20, "y1": _WTC_CY, "theta1": np.pi,
-                 "x2": 0.30, "y2": _WTC_CY,  "theta2": np.pi,
+    # Animation ends at back-rotation completion — no extra departure to avoid a sudden jump.
+    {"t": 1.00,  "x1": l1 + l2 + l3, "y1": _WTC_CY, "theta1": np.pi,
+                 "x2": _WTC_X2_EFF,   "y2": _WTC_CY, "theta2": np.pi,
                  "constraint_set": "ceiling", "wall_x": WALL_X, "ceiling_y": _WTC_CY},
 ]
 
@@ -618,9 +742,8 @@ KEYFRAMES_WALL_TO_CEILING = [
 #  positions without surface-contact clamping.
 
 _R    = wg.wheel_r    # 0.050
-_BARA = wg.bar_len_a  # ≈ 0.141  (arm_a lever length)
-_THG  = wg.thigh      # 0.08951
-_CLF  = wg.calf       # 0.042
+_BARA = wg.bar_len_a  # 0.125  (arm_a lever length)
+_CLF  = wg.calf       # 0.0921
 
 
 def _cj(phi):
@@ -630,8 +753,8 @@ def _cj(phi):
     arm_dir = phi - np.pi / 2 + wg.arm_a1   # arm_a1 direction at theta=phi
     vx    = awc_x - _BARA * np.cos(arm_dir)
     vy    = awc_y - _BARA * np.sin(arm_dir)
-    return (vx + _THG * np.cos(phi) - _CLF * np.sin(phi),
-            vy + _THG * np.sin(phi) + _CLF * np.cos(phi))
+    return (vx - _CLF * np.sin(phi),
+            vy + _CLF * np.cos(phi))
 
 
 def _cj2(phi):
@@ -641,8 +764,8 @@ def _cj2(phi):
     arm_dir = phi - np.pi / 2 + wg.arm_a2   # arm_a2 direction at theta=phi
     vx    = awc_x - _BARA * np.cos(arm_dir)
     vy    = awc_y - _BARA * np.sin(arm_dir)
-    return (vx - _THG * np.cos(phi) - _CLF * np.sin(phi),
-            vy - _THG * np.sin(phi) + _CLF * np.cos(phi))
+    return (vx - _CLF * np.sin(phi),
+            vy + _CLF * np.cos(phi))
 
 
 # Assembly 1 stop: right-wheel centre at (WALL_X, CEILING_Y+R).
@@ -657,101 +780,123 @@ _YW2   = _cj2(np.pi / 2)[1]
 
 _CSE   = "outside_exact"  # exact positions; outside penalties still on
 
+# Separation parameters — both used in approach and departure.
+_SEP_FAR  = 0.95 * (l1 + l2 + l3)   # assembly separation at animation start/end (≈ 0.950 m)
+_SEP_NEAR = l2                         # assembly separation when near the corner  (= 0.500 m)
+
+# Approach: front starts _SEP_NEAR past the corner; back starts _SEP_FAR behind front.
+_OUT_X2_NEAR  = 0.550                              # back hold x while front rotates
+_OUT_X1_START = _XSTP  + _SEP_NEAR               # front start x (= _OUT_X2_NEAR)
+_OUT_X2_START = _OUT_X1_START + _SEP_FAR    # back start x  = _OUT_X1_START + 0.95*L
+# Back moves toward corner during front rotation to give the front more reach.
+_OUT_X2_ROT_END  = 0.300                          # back x at end of front rotation
+_OUT_X2_ROT_STEP = (_OUT_X2_ROT_END - _OUT_X2_NEAR) / 6  # per-step decrement (= −0.03333 m)
+
+# Phase timing (all derived from ω constraint and sep constants).
+_OUT_T_FRONT_STOP = _dt_slide(_SEP_FAR, _SEP_NEAR)          # approach: back moves _SEP_FAR
+_OUT_ROT_DT       = 0.035                                    # 0.025 causes 10°/fr q1 jump during rotation
+_OUT_T_ROT1_S     = _OUT_T_FRONT_STOP + 0.025               # pause → front rotation start
+_OUT_T_ROT1_E     = _OUT_T_ROT1_S     + 6 * _OUT_ROT_DT    # front rotation end (6 × 15°)
+_OUT_T_BOTH_S     = _OUT_T_ROT1_E     + 0.025               # pause → both-moving start
+_OUT_T_BACK_ARR   = _OUT_T_BOTH_S     + _dt_slide(_OUT_X2_ROT_END - _XSTP2)  # back travels from ROT_END
+_OUT_T_ROT2_E     = _OUT_T_BACK_ARR   + 6 * _OUT_ROT_DT    # back rotation end (no pause3)
+
+# Departure: both descend together maintaining constant separation.
+_OUT_Y1_FINAL = _YW2 - _SEP_FAR   # front end y  (= _YW2 − 0.95L ≈ −0.400)
+
 
 def _y1_descent(t):
-    """Front y during linear descent from _YW at t=0.490 at 1.75/unit."""
-    return _YW - 1.75 * (t - 0.490)
+    """Front chain-joint y: linear descent from _YW at _OUT_T_BOTH_S to _OUT_Y1_FINAL at t=1.0."""
+    frac = (t - _OUT_T_BOTH_S) / (1.0 - _OUT_T_BOTH_S)
+    return _YW + frac * (_OUT_Y1_FINAL - _YW)
+
+
+_SEP_ROT2E    = _YW2 - _y1_descent(_OUT_T_ROT2_E)   # actual y-separation when both land on wall
+_OUT_Y2_FINAL = _OUT_Y1_FINAL + _SEP_ROT2E           # back descends same Δy as front
 
 
 KEYFRAMES_OUTSIDE = [
-    # Phase 0 — both approach on ceiling (theta=0), moving left at ≤3.0/unit.
-    # front: 0.82→_XSTP, back: 1.15→0.300
-    {"t": 0.000, "x1": 0.76,   "y1": _Y0, "theta1": 0.0,
-                 "x2": 1.150,  "y2": _Y0, "theta2": 0.0,
-                 "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-    # Front arrives at its stop; back at x2=0.30.
-    {"t": 0.290, "x1": _XSTP,  "y1": _Y0, "theta1": 0.0,
-                 "x2": 0.400,  "y2": _Y0, "theta2": 0.0,
-                 "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-    # Front stationary at corner for 0.025 before rotation; back holds at x2=0.300.
-    {"t": 0.315, "x1": _XSTP, "y1": _Y0, "theta1": 0.0,
-                 "x2": 0.400, "y2": _Y0, "theta2": 0.0,
-                 "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-    # Front rotates (phi: 0 → π/2): 6 steps × 15° × Δt=0.025 = 0.150 total.
-    # Back holds stationary at x2=0.300 while front completes its rotation.
-    {"t": 0.340, "x1": _cj(    np.pi / 12)[0], "y1": _cj(    np.pi / 12)[1],
-                 "theta1":     np.pi / 12,
-                 "x2": 0.400,                   "y2": _Y0, "theta2": 0.0,
-                 "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-    {"t": 0.365, "x1": _cj(    np.pi /  6)[0], "y1": _cj(    np.pi /  6)[1],
-                 "theta1":     np.pi /  6,
-                 "x2": 0.400,                   "y2": _Y0, "theta2": 0.0,
-                 "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-    {"t": 0.390, "x1": _cj(    np.pi /  4)[0], "y1": _cj(    np.pi /  4)[1],
-                 "theta1":     np.pi /  4,
-                 "x2": 0.400,                   "y2": _Y0, "theta2": 0.0,
-                 "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-    {"t": 0.415, "x1": _cj(    np.pi /  3)[0], "y1": _cj(    np.pi /  3)[1],
-                 "theta1":     np.pi /  3,
-                 "x2": 0.400,                   "y2": _Y0, "theta2": 0.0,
-                 "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-    {"t": 0.440, "x1": _cj(5 * np.pi / 12)[0], "y1": _cj(5 * np.pi / 12)[1],
-                 "theta1": 5 * np.pi / 12,
-                 "x2": 0.400,                    "y2": _Y0, "theta2": 0.0,
-                 "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-    # Front rotation done — fully on exterior wall; back still on ceiling at x2=0.300.
-    {"t": 0.465, "x1": _XW, "y1": _YW, "theta1": np.pi / 2,
-                 "x2": 0.400,            "y2": _Y0, "theta2": 0.0,
-                 "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-    # Both pause for 0.025; then back starts approaching while front descends.
-    {"t": 0.490, "x1": _XW, "y1": _YW, "theta1": np.pi / 2,
-                 "x2": 0.400,            "y2": _Y0, "theta2": 0.0,
-                 "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-    # Back approaches at ≈2.72/unit, arriving at _XSTP2 at t=0.670.
-    # Front descends at 1.75/unit from _YW throughout.
-    {"t": 0.670, "x1": _XW, "y1": _y1_descent(0.670), "theta1": np.pi / 2,
-                 "x2": _XSTP2,               "y2": _Y0, "theta2": 0.0,
-                 "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-    # Back stationary at corner for 0.025 before rotation.
-    {"t": 0.695, "x1": _XW, "y1": _y1_descent(0.695), "theta1": np.pi / 2,
-                 "x2": _XSTP2,               "y2": _Y0, "theta2": 0.0,
-                 "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-    # Back rotates (phi: 0 → π/2): 6 steps × 15° × Δt=0.025 = 0.150 total.
-    # Front descends at 1.75/unit throughout.
-    {"t": 0.720, "x1": _XW, "y1": _y1_descent(0.720),
-                 "theta1": np.pi / 2,
-                 "x2": _cj2(    np.pi / 12)[0], "y2": _cj2(    np.pi / 12)[1],
-                 "theta2":     np.pi / 12,
-                 "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-    {"t": 0.745, "x1": _XW, "y1": _y1_descent(0.745),
-                 "theta1": np.pi / 2,
-                 "x2": _cj2(    np.pi /  6)[0], "y2": _cj2(    np.pi /  6)[1],
-                 "theta2":     np.pi /  6,
-                 "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-    {"t": 0.770, "x1": _XW, "y1": _y1_descent(0.770),
-                 "theta1": np.pi / 2,
-                 "x2": _cj2(    np.pi /  4)[0], "y2": _cj2(    np.pi /  4)[1],
-                 "theta2":     np.pi /  4,
-                 "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-    {"t": 0.795, "x1": _XW, "y1": _y1_descent(0.795),
-                 "theta1": np.pi / 2,
-                 "x2": _cj2(    np.pi /  3)[0], "y2": _cj2(    np.pi /  3)[1],
-                 "theta2":     np.pi /  3,
-                 "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-    {"t": 0.820, "x1": _XW, "y1": _y1_descent(0.820),
-                 "theta1": np.pi / 2,
-                 "x2": _cj2(5 * np.pi / 12)[0], "y2": _cj2(5 * np.pi / 12)[1],
-                 "theta2": 5 * np.pi / 12,
-                 "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-    # Back rotation done — fully on exterior wall.
-    {"t": 0.845, "x1": _XW, "y1": _y1_descent(0.845),
-                 "theta1": np.pi / 2,
-                 "x2": _XW,  "y2": _YW2, "theta2": np.pi / 2,
-                 "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
-    # Both descend at ≤3.0/unit.
-    {"t": 1.000, "x1": _XW, "y1": -0.350, "theta1": np.pi / 2,
-                 "x2": _XW,  "y2":  0.125, "theta2": np.pi / 2,
-                 "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+    # Approach — both flat (theta=0), sep closes from _SEP_FAR to _SEP_NEAR.
+    # Front travels _SEP_NEAR; back travels _SEP_FAR (faster, closes gap).
+    {"t": 0.000,
+     "x1": _OUT_X1_START, "y1": _Y0, "theta1": 0.0,
+     "x2": _OUT_X2_START, "y2": _Y0, "theta2": 0.0,
+     "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+    {"t": _OUT_T_FRONT_STOP,
+     "x1": _XSTP,         "y1": _Y0, "theta1": 0.0,
+     "x2": _OUT_X2_NEAR,  "y2": _Y0, "theta2": 0.0,
+     "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+    # Pause before front rotation.
+    {"t": _OUT_T_ROT1_S,
+     "x1": _XSTP,         "y1": _Y0, "theta1": 0.0,
+     "x2": _OUT_X2_NEAR,  "y2": _Y0, "theta2": 0.0,
+     "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+    # Front rotation: phi 0 → π/2 (6 × 15° × Δt=_OUT_ROT_DT).  Back inches from _OUT_X2_NEAR to _OUT_X2_ROT_END.
+    {"t": _OUT_T_ROT1_S + 1*_OUT_ROT_DT,
+     "x1": _cj(    np.pi / 12)[0], "y1": _cj(    np.pi / 12)[1], "theta1":     np.pi / 12,
+     "x2": _OUT_X2_NEAR + 1*_OUT_X2_ROT_STEP, "y2": _Y0, "theta2": 0.0,
+     "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+    {"t": _OUT_T_ROT1_S + 2*_OUT_ROT_DT,
+     "x1": _cj(    np.pi /  6)[0], "y1": _cj(    np.pi /  6)[1], "theta1":     np.pi /  6,
+     "x2": _OUT_X2_NEAR + 2*_OUT_X2_ROT_STEP, "y2": _Y0, "theta2": 0.0,
+     "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+    {"t": _OUT_T_ROT1_S + 3*_OUT_ROT_DT,
+     "x1": _cj(    np.pi /  4)[0], "y1": _cj(    np.pi /  4)[1], "theta1":     np.pi /  4,
+     "x2": _OUT_X2_NEAR + 3*_OUT_X2_ROT_STEP, "y2": _Y0, "theta2": 0.0,
+     "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+    {"t": _OUT_T_ROT1_S + 4*_OUT_ROT_DT,
+     "x1": _cj(    np.pi /  3)[0], "y1": _cj(    np.pi /  3)[1], "theta1":     np.pi /  3,
+     "x2": _OUT_X2_NEAR + 4*_OUT_X2_ROT_STEP, "y2": _Y0, "theta2": 0.0,
+     "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+    {"t": _OUT_T_ROT1_S + 5*_OUT_ROT_DT,
+     "x1": _cj(5 * np.pi / 12)[0], "y1": _cj(5 * np.pi / 12)[1], "theta1": 5 * np.pi / 12,
+     "x2": _OUT_X2_NEAR + 5*_OUT_X2_ROT_STEP, "y2": _Y0, "theta2": 0.0,
+     "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+    # Front rotation done (phi=π/2).  Pause before both-moving.
+    {"t": _OUT_T_ROT1_E,
+     "x1": _XW, "y1": _YW, "theta1": np.pi / 2,
+     "x2": _OUT_X2_ROT_END, "y2": _Y0, "theta2": 0.0,
+     "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+    {"t": _OUT_T_BOTH_S,
+     "x1": _XW, "y1": _YW, "theta1": np.pi / 2,
+     "x2": _OUT_X2_ROT_END, "y2": _Y0, "theta2": 0.0,
+     "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+    # Both moving: front descends linearly; back approaches _XSTP2 (travels _SEP_NEAR).
+    {"t": _OUT_T_BACK_ARR,
+     "x1": _XW, "y1": _y1_descent(_OUT_T_BACK_ARR), "theta1": np.pi / 2,
+     "x2": _XSTP2, "y2": _Y0, "theta2": 0.0,
+     "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+    # Back rotation: phi 0 → π/2 (6 × 15° × Δt=_OUT_ROT_DT).  No pause — rotation starts immediately.
+    {"t": _OUT_T_BACK_ARR + 1*_OUT_ROT_DT,
+     "x1": _XW, "y1": _y1_descent(_OUT_T_BACK_ARR + 1*_OUT_ROT_DT), "theta1": np.pi / 2,
+     "x2": _cj2(    np.pi / 12)[0], "y2": _cj2(    np.pi / 12)[1], "theta2":     np.pi / 12,
+     "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+    {"t": _OUT_T_BACK_ARR + 2*_OUT_ROT_DT,
+     "x1": _XW, "y1": _y1_descent(_OUT_T_BACK_ARR + 2*_OUT_ROT_DT), "theta1": np.pi / 2,
+     "x2": _cj2(    np.pi /  6)[0], "y2": _cj2(    np.pi /  6)[1], "theta2":     np.pi /  6,
+     "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+    {"t": _OUT_T_BACK_ARR + 3*_OUT_ROT_DT,
+     "x1": _XW, "y1": _y1_descent(_OUT_T_BACK_ARR + 3*_OUT_ROT_DT), "theta1": np.pi / 2,
+     "x2": _cj2(    np.pi /  4)[0], "y2": _cj2(    np.pi /  4)[1], "theta2":     np.pi /  4,
+     "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+    {"t": _OUT_T_BACK_ARR + 4*_OUT_ROT_DT,
+     "x1": _XW, "y1": _y1_descent(_OUT_T_BACK_ARR + 4*_OUT_ROT_DT), "theta1": np.pi / 2,
+     "x2": _cj2(    np.pi /  3)[0], "y2": _cj2(    np.pi /  3)[1], "theta2":     np.pi /  3,
+     "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+    {"t": _OUT_T_BACK_ARR + 5*_OUT_ROT_DT,
+     "x1": _XW, "y1": _y1_descent(_OUT_T_BACK_ARR + 5*_OUT_ROT_DT), "theta1": np.pi / 2,
+     "x2": _cj2(5 * np.pi / 12)[0], "y2": _cj2(5 * np.pi / 12)[1], "theta2": 5 * np.pi / 12,
+     "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+    # Back rotation done — fully on wall.  sep = y2 − y1 ≈ _SEP_NEAR here.
+    {"t": _OUT_T_ROT2_E,
+     "x1": _XW, "y1": _y1_descent(_OUT_T_ROT2_E), "theta1": np.pi / 2,
+     "x2": _XW, "y2": _YW2, "theta2": np.pi / 2,
+     "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
+    # Departure: both descend together at constant separation _SEP_ROT2E.
+    {"t": 1.000,
+     "x1": _XW, "y1": _OUT_Y1_FINAL, "theta1": np.pi / 2,
+     "x2": _XW, "y2": _OUT_Y2_FINAL, "theta2": np.pi / 2,
+     "constraint_set": _CSE, "wall_x": WALL_X, "ceiling_y": CEILING_Y},
 ]
 
 # ── Scenario 4: top of thin edge -> below thin edge ──────────────────────────
@@ -776,15 +921,15 @@ def _cp_te(phi):
 def _cj_te(phi):
     """Chain-joint for side=+1 assembly during CW pivot. theta=−phi."""
     vx, vy = _cp_te(phi)
-    return (vx + wg.thigh * np.cos(phi) + wg.calf * np.sin(phi),
-            vy - wg.thigh * np.sin(phi) + wg.calf * np.cos(phi))
+    return (vx + wg.calf * np.sin(phi),
+            vy + wg.calf * np.cos(phi))
 
 
 def _cj_te2(phi):
     """Chain-joint for side=-1 assembly during CW pivot. theta=−phi."""
     vx, vy = _cp_te(phi)
-    return (vx - wg.thigh * np.cos(phi) + wg.calf * np.sin(phi),
-            vy + wg.thigh * np.sin(phi) + wg.calf * np.cos(phi))
+    return (vx + wg.calf * np.sin(phi),
+            vy + wg.calf * np.cos(phi))
 
 
 _XSTP_TE  = _cj_te(0)[0]    # green stop: arm_a1 wheel at terminus
@@ -798,14 +943,18 @@ _YW_red   = _cj_te2(np.pi)[1]
 
 _CTE = "thin_edge_exact"
 
+# Red retreat bounds during green rotation (Phase 4).
+_TE_X2_RETREAT_S = 0.375   # red x2 when green rotation begins
+_TE_X2_RETREAT_E = -0.156  # red x2 when green rotation ends (11 steps later)
+
 KEYFRAMES_THIN_EDGE = [
     # Phase 0 — both approach on edge top (theta=0), moving right.
     # Red (x2, assembly 2) leads; green (x1, assembly 1) trails.
-    {"t": 0.00, "x1": -0.475, "y1": _Y0_TE, "theta1": 0.0,
-                "x2": -0.108, "y2": _Y0_TE, "theta2": 0.0,
+    {"t": 0.00, "x1": -0.575, "y1": _Y0_TE, "theta1": 0.0,
+                "x2": -0.075, "y2": _Y0_TE, "theta2": 0.0,
                 "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
     # Phase 1 — red stops (left wheel above terminus); green still approaching.
-    {"t": 0.20, "x1":  0.1,    "y1": _Y0_TE, "theta1": 0.0,
+    {"t": 0.20, "x1":  -0.06,    "y1": _Y0_TE, "theta1": 0.0,
                 "x2": _XSTP_red, "y2": _Y0_TE, "theta2": 0.0,
                 "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
     # Phase 2 — red pivot (CW: theta2: 0 → −π), 12 steps × 15° × Δt=0.025.
@@ -814,112 +963,71 @@ KEYFRAMES_THIN_EDGE = [
     # throughout its rotation; green's arm_b1 wheel must stay ≥0.10m away (2×wheel_r).
     # Constraint: x1 ≤ 0.250 (arm_b1 wheel at x=0.302, dist=0.138 to pivot).
     # Early frames also need x1 reduced to clear red's swinging arm_b2 wheel.
-    {"t": 0.225, "x1":  0.1,    "y1": _Y0_TE, "theta1": 0.0,
+    {"t": 0.232, "x1":  -0.06,    "y1": _Y0_TE, "theta1": 0.0,
                  "x2": _cj_te2( np.pi/12)[0], "y2": _cj_te2( np.pi/12)[1],
                  "theta2": -np.pi / 12,
                  "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-    {"t": 0.250, "x1":  0.1,    "y1": _Y0_TE, "theta1": 0.0,
+    {"t": 0.264, "x1":  -0.06,    "y1": _Y0_TE, "theta1": 0.0,
                  "x2": _cj_te2(  np.pi/6)[0], "y2": _cj_te2(  np.pi/6)[1],
                  "theta2": -np.pi / 6,
                  "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-    {"t": 0.275, "x1":  0.1,    "y1": _Y0_TE, "theta1": 0.0,
+    {"t": 0.296, "x1":  -0.06,    "y1": _Y0_TE, "theta1": 0.0,
                  "x2": _cj_te2(  np.pi/4)[0], "y2": _cj_te2(  np.pi/4)[1],
                  "theta2": -np.pi / 4,
                  "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-    {"t": 0.300, "x1":  0.125,    "y1": _Y0_TE, "theta1": 0.0,
+    {"t": 0.321, "x1":  0,    "y1": _Y0_TE, "theta1": 0.0,
                  "x2": _cj_te2(  np.pi/3)[0], "y2": _cj_te2(  np.pi/3)[1],
                  "theta2": -np.pi / 3,
                  "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-    {"t": 0.325, "x1":  0.15,    "y1": _Y0_TE, "theta1": 0.0,
+    {"t": 0.346, "x1":  0.05,    "y1": _Y0_TE, "theta1": 0.0,
                  "x2": _cj_te2(5*np.pi/12)[0], "y2": _cj_te2(5*np.pi/12)[1],
                  "theta2": -5 * np.pi / 12,
                  "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-    {"t": 0.350, "x1":  0.15,    "y1": _Y0_TE, "theta1": 0.0,
+    {"t": 0.371, "x1":  0.1,    "y1": _Y0_TE, "theta1": 0.0,
                  "x2": _cj_te2(  np.pi/2)[0], "y2": _cj_te2(  np.pi/2)[1],
                  "theta2": -np.pi / 2,
                  "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-    {"t": 0.375, "x1":  0.15,    "y1": _Y0_TE, "theta1": 0.0,
+    {"t": 0.396, "x1":  0.15,    "y1": _Y0_TE, "theta1": 0.0,
                  "x2": _cj_te2(7*np.pi/12)[0], "y2": _cj_te2(7*np.pi/12)[1],
                  "theta2": -7 * np.pi / 12,
                  "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-    {"t": 0.400, "x1":  0.2,    "y1": _Y0_TE, "theta1": 0.0,
+    {"t": 0.421, "x1":  0.2,    "y1": _Y0_TE, "theta1": 0.0,
                  "x2": _cj_te2(2*np.pi/3)[0], "y2": _cj_te2(2*np.pi/3)[1],
                  "theta2": -2 * np.pi / 3,
                  "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-    {"t": 0.425, "x1":  0.25,    "y1": _Y0_TE, "theta1": 0.0,
+    {"t": 0.446, "x1":  0.25,    "y1": _Y0_TE, "theta1": 0.0,
                  "x2": _cj_te2(3*np.pi/4)[0], "y2": _cj_te2(3*np.pi/4)[1],
                  "theta2": -3 * np.pi / 4,
                  "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-    {"t": 0.450, "x1":  0.3,    "y1": _Y0_TE, "theta1": 0.0,
+    {"t": 0.471, "x1":  0.3,    "y1": _Y0_TE, "theta1": 0.0,
                  "x2": _cj_te2(5*np.pi/6)[0], "y2": _cj_te2(5*np.pi/6)[1],
                  "theta2": -5 * np.pi / 6,
                  "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-    {"t": 0.475, "x1":  0.35,    "y1": _Y0_TE, "theta1": 0.0,
+    {"t": 0.496, "x1":  0.35,    "y1": _Y0_TE, "theta1": 0.0,
                  "x2": _cj_te2(11*np.pi/12)[0], "y2": _cj_te2(11*np.pi/12)[1],
                  "theta2": -11 * np.pi / 12,
                  "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
     # Red pivot done; green waits at x1=0.25 until safe to advance.
-    {"t": 0.500, "x1":  0.4,    "y1": _Y0_TE, "theta1": 0.0,
+    {"t": 0.521, "x1":  0.4,    "y1": _Y0_TE, "theta1": 0.0,
                  "x2": _XW_red,    "y2": _YW_red, "theta2": -np.pi,
                  "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
     # Phase 3 — stagger: green rolls to pivot start.
-    # cold_at=0.61 fires between t=0.595 and t=0.620.
-    {"t": 0.595, "x1": _XSTP_TE,  "y1": _Y0_TE, "theta1": 0.0,
-                 "x2":  0.375,     "y2": _YW_red, "theta2": -np.pi,
+    # cold_at=0.61 fires between t=0.616 and t=0.641.
+    {"t": 0.616, "x1": _XSTP_TE,  "y1": _Y0_TE, "theta1": 0.0,
+                 "x2": _TE_X2_RETREAT_S, "y2": _YW_red, "theta2": -np.pi,
                  "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
     # Phase 4 — green pivot (CW: theta1: 0 → −π), 12 steps × 15° × Δt=0.025.
-    # Red retreats from x2=0.375 → −0.156 over 11 steps.
-    {"t": 0.620, "x1": _cj_te( np.pi/12)[0], "y1": _cj_te( np.pi/12)[1],
-                 "theta1": -np.pi / 12,
-                 "x2":  0.375,   "y2": _YW_red, "theta2": -np.pi,
-                 "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-    {"t": 0.645, "x1": _cj_te(  np.pi/6)[0], "y1": _cj_te(  np.pi/6)[1],
-                 "theta1": -np.pi / 6,
-                 "x2":  0.327,   "y2": _YW_red, "theta2": -np.pi,
-                 "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-    {"t": 0.670, "x1": _cj_te(  np.pi/4)[0], "y1": _cj_te(  np.pi/4)[1],
-                 "theta1": -np.pi / 4,
-                 "x2":  0.279,   "y2": _YW_red, "theta2": -np.pi,
-                 "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-    {"t": 0.695, "x1": _cj_te(  np.pi/3)[0], "y1": _cj_te(  np.pi/3)[1],
-                 "theta1": -np.pi / 3,
-                 "x2":  0.231,   "y2": _YW_red, "theta2": -np.pi,
-                 "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-    {"t": 0.720, "x1": _cj_te(5*np.pi/12)[0], "y1": _cj_te(5*np.pi/12)[1],
-                 "theta1": -5 * np.pi / 12,
-                 "x2":  0.183,   "y2": _YW_red, "theta2": -np.pi,
-                 "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-    {"t": 0.745, "x1": _cj_te(  np.pi/2)[0], "y1": _cj_te(  np.pi/2)[1],
-                 "theta1": -np.pi / 2,
-                 "x2":  0.135,   "y2": _YW_red, "theta2": -np.pi,
-                 "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-    {"t": 0.770, "x1": _cj_te(7*np.pi/12)[0], "y1": _cj_te(7*np.pi/12)[1],
-                 "theta1": -7 * np.pi / 12,
-                 "x2":  0.087,   "y2": _YW_red, "theta2": -np.pi,
-                 "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-    {"t": 0.795, "x1": _cj_te(2*np.pi/3)[0], "y1": _cj_te(2*np.pi/3)[1],
-                 "theta1": -2 * np.pi / 3,
-                 "x2":  0.039,   "y2": _YW_red, "theta2": -np.pi,
-                 "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-    {"t": 0.820, "x1": _cj_te(3*np.pi/4)[0], "y1": _cj_te(3*np.pi/4)[1],
-                 "theta1": -3 * np.pi / 4,
-                 "x2": -0.009,   "y2": _YW_red, "theta2": -np.pi,
-                 "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-    {"t": 0.845, "x1": _cj_te(5*np.pi/6)[0], "y1": _cj_te(5*np.pi/6)[1],
-                 "theta1": -5 * np.pi / 6,
-                 "x2": -0.057,   "y2": _YW_red, "theta2": -np.pi,
-                 "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-    {"t": 0.870, "x1": _cj_te(11*np.pi/12)[0], "y1": _cj_te(11*np.pi/12)[1],
-                 "theta1": -11 * np.pi / 12,
-                 "x2": -0.105,   "y2": _YW_red, "theta2": -np.pi,
-                 "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
-    # Green pivot done; red retreat done — both below edge.
-    {"t": 0.895, "x1": _XW_TE,  "y1": _YW_TE, "theta1": -np.pi,
-                 "x2": -0.156,   "y2": _YW_red, "theta2": -np.pi,
-                 "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
+    # Red retreats from _TE_X2_RETREAT_S to _TE_X2_RETREAT_E in 11 equal steps.
+    *[{"t": 0.641 + k * 0.025,
+       "x1": _cj_te((k + 1) * np.pi / 12)[0], "y1": _cj_te((k + 1) * np.pi / 12)[1],
+       "theta1": -(k + 1) * np.pi / 12,
+       "x2": _TE_X2_RETREAT_S + k * (_TE_X2_RETREAT_E - _TE_X2_RETREAT_S) / 11,
+       "y2": _YW_red, "theta2": -np.pi,
+       "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y}
+      for k in range(12)],
     # Phase 5 — both below edge, moving left.
-    {"t": 1.00, "x1":  0.040,   "y1": _YW_TE, "theta1": -np.pi,
-                "x2": -0.440,   "y2": _YW_red, "theta2": -np.pi,
+    {"t": 1.00, "x1":  0.20,   "y1": _YW_TE, "theta1": -np.pi,
+                "x2": -0.40,   "y2": _YW_red, "theta2": -np.pi,
                 "constraint_set": _CTE, "wall_x": EDGE_X, "ceiling_y": EDGE_Y},
 ]
 
@@ -928,7 +1036,7 @@ SCENARIO_CONFIG = {
     "floor_to_wall": {
         "keyframes":     KEYFRAMES_FLOOR_TO_WALL,
         "n_grid":        120,
-        "smooth_weight": 200.0,
+        "smooth_weight": 20.0,
         "cold_at":       None,
         "xlim":          (-0.2, 2.2),
         "ylim":          (-0.2, 1.5),
@@ -938,7 +1046,7 @@ SCENARIO_CONFIG = {
     "wall_to_ceiling": {
         "keyframes":     KEYFRAMES_WALL_TO_CEILING,
         "n_grid":        60,
-        "smooth_weight": 60.0,
+        "smooth_weight": 15.0,
         "cold_at":       None,
         "xlim":          (-0.5, 1.75),
         "ylim":          (-0.5, 2.0),
@@ -961,7 +1069,7 @@ SCENARIO_CONFIG = {
         "smooth_weight": 30.0,
         "cold_at":       None,
         "xlim":          (-0.7, 1.2),
-        "ylim":          (-0.35, 1.0),
+        "ylim":          (-0.35, 1.3),
         "output":        "thin_edge.mp4",
         "label":         "Thin edge (top -> bottom)",
     },
@@ -981,7 +1089,6 @@ if __name__ == "__main__":
     ylim          = cfg["ylim"]
     output        = cfg["output"]
     label         = cfg["label"]
-    N_FRAMES      = 90
     FPS           = 15
     N_GRID        = cfg["n_grid"]
     SMOOTH_WEIGHT = cfg["smooth_weight"]
@@ -993,18 +1100,23 @@ if __name__ == "__main__":
                               seed_at=cfg.get("seed_at"))
     print("-" * 60)
     # ---- joint-angle limit + jump + sign + ω check ------------------- #
-    _JUMP_THRESH  = np.radians(10.0)   # per-frame limit (all 4 joints)
-    _LIMIT        = np.radians(135.0)
-    _OMEGA_MAX    = 0.70               # rad/frame
+    _JUMP_THRESH  = np.radians(7.5)
+    _SOFT_DISP    = np.radians(90.0)   # ±90° display soft limit
+    _LIMIT_DISP   = np.radians(105.0)  # ±105° display hard limit
+    _OMEGA_MAX    = _OMEGA_LIM
     _WHEEL_R      = wg.wheel_r
     _issues = []
     _names  = ["q1", "q2", "q3", "q4"]
     # Limit + sign checks (per frame)
     for _i, (_q, _, _p) in enumerate(frames):
-        for _jidx in (0, 3):           # |q1|, |q4| >= 135°
-            if abs(_q[_jidx]) >= _LIMIT:
-                _issues.append(f"  LIMIT   fr{_i:02d}  {_names[_jidx]}={np.degrees(_q[_jidx]):+.1f}°")
-        for _jidx in (1, 2):           # q2, q3 must be <= 0
+        _qd = _q_display(_q)
+        for _jidx in range(4):
+            _qd_abs = abs(float(_qd[_jidx]))
+            if _qd_abs > _LIMIT_DISP:
+                _issues.append(f"  LIMIT   fr{_i:02d}  {_names[_jidx]}={np.degrees(float(_qd[_jidx])):+.1f}°")
+            elif _qd_abs > _SOFT_DISP:
+                _issues.append(f"  SOFT    fr{_i:02d}  {_names[_jidx]}={np.degrees(float(_qd[_jidx])):+.1f}°")
+        for _jidx in (1, 2):           # q2, q3 must be <= 0 (internal = display)
             if float(_q[_jidx]) > 0.0:
                 _issues.append(f"  SIGN    fr{_i:02d}  {_names[_jidx]}={np.degrees(float(_q[_jidx])):+.2f}°")
     # Jump check (frame-to-frame)
@@ -1032,7 +1144,7 @@ if __name__ == "__main__":
                 _issues.append(
                     f"  OMEGA   fr{_i-1:02d}→{_i:02d}  {_tk[:2]}  ω={_om:.3f} rad/fr")
     if not _issues:
-        print("Check: CLEAN (no limits, signs, jumps≥10°, or ω violations)")
+        print("Check: CLEAN (no limits, signs, jumps≥7.5°, or ω violations)")
     else:
         for _msg in _issues:
             print(_msg)

@@ -37,19 +37,17 @@ class WheelGeometry:
     wheel_r:   float = 0.050      # wheel radius
     # Per-assembly arm offsets from centreline c = theta − π/2.
     # Wheel direction from axle = c + arm_angle.  Positive → forward-leaning; negative → backward.
-    arm_a1: float = 0.0           # front assembly, arm A (straight down at θ=0)
-    arm_b1: float = np.pi / 4    # front assembly, arm B (+45° forward at θ=0)
-    arm_a2: float = 0.0           # back assembly,  arm A (straight down at θ=0)
-    arm_b2: float = -np.pi / 4   # back assembly,  arm B (−45° backward at θ=0)
-    calf:   float = 0.042        # vertical strut from V-apex up to elbow
-    thigh:  float = 0.08951      # horizontal strut from elbow to chain joint (q1/q4)
-    bar_len_a: float = None       # arm A length; if None, derived so arm_a wheel also contacts surface
+    arm_a1: float = 0.0                                  # front assembly, arm A (straight down at θ=0)
+    arm_b1: float = np.arctan(0.1263 / 0.125)           # front assembly, arm B (~45.3° forward at θ=0)
+    arm_a2: float = 0.0                                  # back assembly,  arm A (straight down at θ=0)
+    arm_b2: float = -np.arctan(0.1263 / 0.125)          # back assembly,  arm B (~−45.3° backward at θ=0)
+    calf:   float = 0.0921       # strut from chain joint to V-apex (perpendicular to theta)
+    bar_len_a: float = 0.125     # arm A length; pass None to auto-derive from bar_len/arm_b1
 
     def __post_init__(self):
         if self.bar_len_a is None:
             # arm_a (straight-down, arm_a=0) length that puts arm_a wheel at the same
             # surface height as arm_b at angle arm_b1.  Equal y-projection at theta=0:
-            #   bar_len_a * |sin(-π/2)| = bar_len * |sin(-π/2 + arm_b1)|
             #   bar_len_a = bar_len * |sin(-π/2 + arm_b1)| = bar_len * cos(arm_b1)
             self.bar_len_a = self.bar_len * abs(np.sin(-np.pi / 2 + self.arm_b1))
 
@@ -66,17 +64,12 @@ def _v_apex(cx: float, cy: float, theta: float, wg: WheelGeometry,
     """
     Return the V-apex (bar midpoint) position given the chain-joint (cx, cy).
 
-    The L-bracket connecting the chain joint to the V-apex consists of:
-      thigh — horizontal in the assembly frame, pointing AWAY from the chain
-              (+theta direction for assembly 1 / side=+1; opposite for side=-1)
-      calf  — perpendicular to theta, pointing toward the surface
-              (direction theta - π/2, i.e. downward when theta=0)
-
-    side=+1  assembly 1 (q1): thigh points backward  (-theta direction from joint)
-    side=-1  assembly 2 (q4): thigh points forward   (+theta direction from joint)
+    The calf strut connects the chain joint directly to the V-apex,
+    perpendicular to theta (direction theta − π/2, i.e. downward when theta=0).
+    The `side` parameter is unused but kept for API compatibility.
     """
-    vx = cx - side * wg.thigh * np.cos(theta) + wg.calf * np.sin(theta)
-    vy = cy - side * wg.thigh * np.sin(theta) - wg.calf * np.cos(theta)
+    vx = cx + wg.calf * np.sin(theta)
+    vy = cy - wg.calf * np.cos(theta)
     return vx, vy
 
 
@@ -108,7 +101,7 @@ def floor_y_for_assembly(theta: float, wg: WheelGeometry, side: int = 1) -> floa
     y_offsets = [wg.bar_len_a * np.sin(c + aa),
                  wg.bar_len   * np.sin(c + ab)]
     y_vapex = wg.wheel_r - min(y_offsets)
-    return y_vapex + side * wg.thigh * np.sin(theta) + wg.calf * np.cos(theta)
+    return y_vapex + wg.calf * np.cos(theta)
 
 
 def wall_x_for_assembly(theta: float, wg: WheelGeometry,
@@ -122,7 +115,7 @@ def wall_x_for_assembly(theta: float, wg: WheelGeometry,
     x_offsets = [wg.bar_len_a * np.cos(c + aa),
                  wg.bar_len   * np.cos(c + ab)]
     x_vapex = wall_x + wg.wheel_r - min(x_offsets)
-    return x_vapex + side * wg.thigh * np.cos(theta) - wg.calf * np.sin(theta)
+    return x_vapex - wg.calf * np.sin(theta)
 
 
 def ceiling_y_for_assembly(theta: float, wg: WheelGeometry,
@@ -136,7 +129,7 @@ def ceiling_y_for_assembly(theta: float, wg: WheelGeometry,
     y_offsets = [wg.bar_len_a * np.sin(c + aa),
                  wg.bar_len   * np.sin(c + ab)]
     y_vapex = ceiling_y - wg.wheel_r - max(y_offsets)
-    return y_vapex + side * wg.thigh * np.sin(theta) + wg.calf * np.cos(theta)
+    return y_vapex + wg.calf * np.cos(theta)
 
 
 def wall_x_exterior_for_assembly(theta: float, wg: WheelGeometry,
@@ -151,7 +144,7 @@ def wall_x_exterior_for_assembly(theta: float, wg: WheelGeometry,
     x_offsets = [wg.bar_len_a * np.cos(c + aa),
                  wg.bar_len   * np.cos(c + ab)]
     x_vapex = wall_x - wg.wheel_r - max(x_offsets)
-    return x_vapex + side * wg.thigh * np.cos(theta) - wg.calf * np.sin(theta)
+    return x_vapex - wg.calf * np.sin(theta)
 
 
 def _surface_contact_adjust(
@@ -289,6 +282,24 @@ def _v_cone_entry_penalty(
 # ------------------------------------------------------------------ #
 #  Individual penalty terms                                           #
 # ------------------------------------------------------------------ #
+
+def _joint_limit_penalty(q: np.ndarray, soft_deg: float = 90.0) -> float:
+    """Soft quadratic penalty when any joint exceeds ±90° in display convention.
+    Display: q1_disp = q1_int - π/2, q4_disp = q4_int - π/2, q2/q3 unchanged.
+    Onset at ±soft_deg (default 90°), hard wall enforced by solver at ±105°.
+    """
+    _soft = np.radians(soft_deg)
+    penalty = 0.0
+    for _qi, _shift in ((float(q[0]), -np.pi / 2),
+                         (float(q[1]),  0.0),
+                         (float(q[2]),  0.0),
+                         (float(q[3]), -np.pi / 2)):
+        _q_disp = _qi + _shift
+        exc = abs(_q_disp) - _soft
+        if exc > 0.0:
+            penalty += exc * exc
+    return penalty
+
 
 def _joint_sign_penalty(q: np.ndarray, require_negative: bool = True,
                         constant: float = 1.0) -> float:
@@ -665,23 +676,20 @@ def total_penalty(
     _bar_w = 0.001 if constraint_set in ("outside", "outside_exact", "thin_edge", "thin_edge_exact") else 1.0
     pen  = _collision_penalty(positions, theta_end, x1, y1, theta1, wg, _bar_w)
     pen += _no_overlap_penalty(positions, theta_end, x1, y1, theta1, wg)
-    # wall/ceiling: joints must bend inward (q2<0, q3<0)
+    # Sign penalties: steer q2 and q3 toward the correct bending direction.
+    # wall/ceiling: joints must bend inward (q2<0, q3<0).
     # outside: q2 sign omitted — near the wrap boundary at q2≈±180° the
     #   wrapped representation flips sign discontinuously, causing false
     #   rejections.  q3 does NOT flip sign during the outside wrap, so we
     #   enforce q3 < 0 (elbow-up) separately.
-    # thin_edge: joints must bend outward (q2>0, q3>0) during normal travel
-    #   but the sign flips discontinuously near the 180° wrap; omit for
-    #   thin_edge_exact (pivot phases) to avoid false rejections.
+    # thin_edge: joints must bend toward the surface (q2<0, q3<0 — downward arch).
+    # thin_edge_exact: soft quadratic only (no constant) so the solver can
+    #   cross q=0 during pivot transitions without a discontinuous cost cliff.
     if constraint_set in ("wall", "wall_exact", "ceiling", "ceiling_exact"):
         pen += _joint_sign_penalty(q, require_negative=True)
     elif constraint_set in ("outside", "outside_exact"):
         q3 = float(q[2])
         if q3 > 0.0:
-            # "outside_exact" is used during pivot transitions where q3 can
-            # legitimately cross 0; use a soft quadratic so the solver can
-            # pass through q3=0 without a discontinuous cost cliff.
-            # "outside" uses a hard barrier (same as wall/ceiling).
             if constraint_set == "outside_exact":
                 pen += q3 * q3
             else:
@@ -689,10 +697,7 @@ def total_penalty(
     elif constraint_set == "thin_edge":
         pen += _joint_sign_penalty(q, require_negative=True, constant=1.0)
     elif constraint_set == "thin_edge_exact":
-        # Soft quadratic — no constant base so the solver can cross q=0
-        # without hitting a cliff, preventing branch-switch teleportation.
         pen += _joint_sign_penalty(q, require_negative=True, constant=0.0)
-    # thin_edge / thin_edge_exact: q2 < 0, q3 < 0 preferred (elbow-up arch)
     # V-cone penalty is skipped for outside/thin_edge: the linkage necessarily
     # exits the apex through the V opening toward the surface, which is valid.
     if constraint_set not in ("outside", "outside_exact", "thin_edge", "thin_edge_exact"):
@@ -704,31 +709,19 @@ def total_penalty(
     if constraint_set in ("wall", "wall_exact", "ceiling"):
         pen += _wall_penalty(positions, theta_end, x1, y1, theta1, wg, wall_x)
 
-    if constraint_set in ("wall", "wall_exact", "ceiling", "ceiling_exact"):
-        _qlim = 2.0 * np.pi / 3.0  # 120°
-        for _qi_idx in (0, 3):
-            _exc = abs(float(q[_qi_idx])) - _qlim
-            if _exc > 0.0:
-                pen += _exc * _exc
-
     if constraint_set in ("ceiling", "ceiling_exact"):
         pen += _ceiling_penalty(positions, theta_end, x1, y1, theta1, wg, ceiling_y)
 
     if constraint_set in ("outside", "outside_exact"):
         pen += _outside_corner_penalty(positions, wall_x, ceiling_y)
         pen += _outside_surface_crossing_penalty(positions, wall_x, ceiling_y)
-        # Soft quadratic penalty for |q1| or |q4| approaching the physical
-        # 135° limit.  Onset at 120° (= 2π/3) so the global search strongly
-        # prefers configurations that stay within physical range.
-        _q_soft_lim = 2.0 * np.pi / 3.0  # 120°
-        for _qi in (float(q[0]), float(q[3])):
-            _exc = abs(_qi) - _q_soft_lim
-            if _exc > 0.0:
-                pen += _exc * _exc
 
     if constraint_set in ("thin_edge", "thin_edge_exact"):
         # wall_x is repurposed as edge_x (right terminus); ceiling_y as edge_y (edge height).
         pen += _thin_edge_crossing_penalty(positions, wall_x, ceiling_y)
+
+    _lim_mult = 8.0 if constraint_set in ("wall", "wall_exact", "ceiling", "ceiling_exact") else 1.0
+    pen += _lim_mult * _joint_limit_penalty(q)
 
     result = weight * pen
     if constraint_set in ("outside", "outside_exact"):
@@ -816,7 +809,7 @@ def _outside_contact_adjust(
         y = min(y, ceiling_y)
     else:
         # Ceiling or double-contact pivot: enforce arm_b ceiling contact on y.
-        vy_offset = -side * wg.thigh * np.sin(theta) - wg.calf * np.cos(theta)
+        vy_offset = -wg.calf * np.cos(theta)
         c = float(theta) - np.pi / 2
         dy_R = wg.bar_len * float(np.sin(c + arm_b))
         y = ceiling_y + wg.wheel_r - vy_offset - dy_R
@@ -847,8 +840,8 @@ def _outside_contact_adjust(
             vx = wall_x + (wx - wall_x) * scale - best_vdx_w
             vy = ceiling_y + (wy - ceiling_y) * scale - best_vdy_w
             # Recover joint position from new V-apex.
-            x = vx + side * wg.thigh * np.cos(theta) - wg.calf * np.sin(theta)
-            y = vy + side * wg.thigh * np.sin(theta) + wg.calf * np.cos(theta)
+            x = vx - wg.calf * np.sin(theta)
+            y = vy + wg.calf * np.cos(theta)
 
     # Clamp: assembly centre must not enter solid block (x < wall_x AND y > ceiling_y).
     if x < wall_x and y > ceiling_y:
@@ -898,7 +891,7 @@ def _thin_edge_contact_adjust(
     dy_R = wg.bar_len   * float(np.sin(c + ab))
 
     # vy_correction converts V-apex y → joint y
-    vy_corr = side * wg.thigh * float(np.sin(theta)) + wg.calf * float(np.cos(theta))
+    vy_corr = wg.calf * float(np.cos(theta))
 
     y_L_top = edge_y + wg.wheel_r - dy_L + vy_corr   # joint y: arm_a wheel on TOP surface
     y_R_bot = edge_y - wg.wheel_r - dy_R + vy_corr   # joint y: arm_b wheel on BOTTOM surface

@@ -22,6 +22,7 @@ from constraints import (WheelGeometry, total_penalty,
                          apply_floor_constraint, apply_wall_constraint,
                          apply_ceiling_constraint, apply_outside_constraint,
                          apply_thin_edge_constraint,
+                         _joint_limit_penalty,
                          CONSTRAINT_SETS)
 
 
@@ -284,13 +285,15 @@ def solve_ik(
                 # candidates.  This fixes the warm-chain bias that lets BFGS
                 # drift to q4>135° while ignoring the qlim penalty (pen_weight=0
                 # during BFGS means the penalty is invisible to the optimiser).
-                _hard_lim = np.radians(135.0)
+                _hard_lim_disp = np.radians(105.0)
                 _hard_pen = 0.0
                 for _qi in (0, 3):
-                    _exc = abs(float(q_cand[_qi])) - _hard_lim
+                    _q_disp_val = float(q_cand[_qi]) - np.pi / 2
+                    _exc = abs(_q_disp_val) - _hard_lim_disp
                     if _exc > 0.0:
                         _hard_pen += 1.0 + _exc * _exc
-                sel = result.fun + _hard_pen * 1e4 + _smooth_cost(q_cand, q_ref, eff_smooth)
+                _soft_pen = 8.0 * _joint_limit_penalty(q_cand) * 1e4
+                sel = result.fun + _hard_pen * 1e4 + _soft_pen + _smooth_cost(q_cand, q_ref, eff_smooth)
                 converged.append((sel, q_cand))
 
         if converged:

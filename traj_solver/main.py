@@ -7,9 +7,9 @@ Usage:
 
 Scenarios: floor_to_wall (default), wall_to_ceiling, outside, thin_edge
 
-Geometry, constraint sets, and snapshot poses are taken directly from
-the matching keyframes in animate_transition.py so the output matches
-the animation.
+Geometry and keyframe poses are taken directly from animate_transition.py
+so the output always matches the animation. Joint angles q1/q4 are shown
+in the calf-up display convention (0° = link straight up from the calf).
 """
 
 import sys
@@ -19,20 +19,25 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-from constraints import WheelGeometry
+from animate_transition import (
+    wg, l1, l2, l3,
+    WALL_X, CEILING_Y, EDGE_X, EDGE_Y,
+    SCENARIO_CONFIG,
+)
+from kinematics import q_display as _q_display
 from solver import solve_ik
 from visualize import plot_robot
 
 
-def _draw_surfaces(ax, constraint_set, wall_x, ceiling_y, xlim, ylim):
-    """Mirror of animate_transition._draw_surfaces so snapshots look identical."""
-    if constraint_set == "wall":
+def _draw_surfaces(ax, constraint_set, wall_x, ceiling_y, edge_x, edge_y, xlim, ylim):
+    """Draw environment surfaces matching the scenario."""
+    if constraint_set in ("floor", "wall", "wall_exact"):
         ax.plot([wall_x, xlim[1]], [0, 0],
                 color="saddlebrown", lw=2, label="Floor")
         ax.plot([wall_x, wall_x], [0, ylim[1]],
                 color="slategray", lw=2, label=f"Wall (x={wall_x})")
 
-    elif constraint_set == "ceiling":
+    elif constraint_set in ("ceiling", "ceiling_exact"):
         ax.plot([wall_x, wall_x], [ylim[0], ceiling_y],
                 color="slategray", lw=2, label=f"Wall (x={wall_x})")
         ax.plot([wall_x, xlim[1]], [ceiling_y, ceiling_y],
@@ -49,95 +54,38 @@ def _draw_surfaces(ax, constraint_set, wall_x, ceiling_y, xlim, ylim):
                 color="slategray", lw=2, label=f"Wall exterior (x={wall_x})")
 
     elif constraint_set in ("thin_edge", "thin_edge_exact"):
-        ax.plot([xlim[0], wall_x], [ceiling_y, ceiling_y],
-                color="saddlebrown", lw=3, label=f"Thin edge (y={ceiling_y})")
-        ax.plot(wall_x, ceiling_y, "D", color="saddlebrown", ms=8,
-                label=f"Right terminus (x={wall_x})")
+        ax.plot([xlim[0], edge_x], [edge_y, edge_y],
+                color="saddlebrown", lw=3, label=f"Thin edge (y={edge_y})")
+        ax.plot(edge_x, edge_y, "D", color="saddlebrown", ms=8,
+                label=f"Right terminus (x={edge_x})")
 
 
 def main():
-    # ------------------------------------------------------------------ #
-    #  Shared robot geometry — must match animate_transition.py exactly   #
-    # ------------------------------------------------------------------ #
-    l1, l2, l3 = 0.25, 0.50, 0.25
-    wg = WheelGeometry(bar_len=0.200, wheel_r=0.050,
-                       arm_a1=0.0, arm_b1=np.pi / 4,
-                       arm_a2=0.0, arm_b2=-np.pi / 4,
-                       calf=0.042, thigh=0.08951)
-
-    WALL_X    = 0.0
-    CEILING_Y = 0.55
-
     scenario = sys.argv[1] if len(sys.argv) > 1 else "floor_to_wall"
 
-    # ------------------------------------------------------------------ #
-    #  Per-scenario snapshot pose                                          #
-    #                                                                      #
-    #  Each pose is taken from a representative keyframe in               #
-    #  animate_transition.py (approx t≈0.5) so it shows a mid-transition #
-    #  state that matches the animation.                                   #
-    # ------------------------------------------------------------------ #
-
-    if scenario == "floor_to_wall":
-        # t=0.57: front on wall mid-climb, back on floor approaching.
-        # ceiling_y=2.0 matches _FTW_CY — keeps the ceiling penalty inactive.
-        constraint_set = "wall"
-        wall_x    = WALL_X
-        ceiling_y = 2.0
-        x1, y1, theta1 = 0.5,  0.0, 0.0
-        x2, y2, theta2 = 1.2, 0.0,   0.0
-        xlim = (-0.2, 1.8)
-        ylim = (-0.2, 1.4)
-        label = "Floor → Wall  (t≈0.46)"
-
-    elif scenario == "wall_to_ceiling":
-        # t=0.57: front on ceiling sliding right (x1=0.57→1.009 snap), back climbing
-        # wall (y2=0.73). ceiling_y=1.2 matches _WTC_CY used throughout that scenario.
-        constraint_set = "ceiling"
-        wall_x    = WALL_X
-        ceiling_y = 1.2
-        x1, y1, theta1 = 0.57, 1.2, np.pi
-        x2, y2, theta2 = 0.0,  0.73, -np.pi / 2
-        xlim = (-0.5, 1.5)
-        ylim = (-0.5, 1.5)
-        label = "Wall → Ceiling  (t≈0.57)"
-
-    elif scenario == "outside":
-        # t≈0.48: front done rotating (theta=π/2, at _XW/_YW), back on ceiling at x2=0.300.
-        # Poses computed from _cj(π/2) and _cj(0) with arm_b1=π/8 geometry.
-        constraint_set = "outside_exact"
-        wall_x    = WALL_X
-        ceiling_y = CEILING_Y
-        x1, y1, theta1 = -0.277, 0.563,  np.pi / 2
-        x2, y2, theta2 =  0.300, 0.827,  0.0
-        xlim = (-0.5, 1.5)
-        ylim = (-0.5, 1.1)
-        label = "Outside corner  (t≈0.48)"
-
-    elif scenario == "thin_edge":
-        # t≈0.35: red (back) mid-pivot at phi=π/2 around right terminus;
-        # green (front) approaching its stop.
-        # EDGE_X=0.44, EDGE_Y=0.50.  arm_a1=arm_a2=0 geometry.
-        # _cp_te(π/2): (EDGE_X+BAR, EDGE_Y+R) = (0.640, 0.550)
-        # _cj_te2(π/2): x2=0.640+calf=0.682, y2=0.550+thigh=0.640
-        # _Y0_TE = EDGE_Y+R+BAR+calf = 0.792
-        constraint_set = "thin_edge_exact"
-        wall_x    = 0.44   # right terminus x (EDGE_X)
-        ceiling_y = 0.50   # edge y (EDGE_Y)
-        x1, y1, theta1 =  0.350, 0.792,  0.0
-        x2, y2, theta2 =  0.682, 0.640, -np.pi / 2
-        xlim = (-0.6, 1.2)
-        ylim = (-0.1, 1.1)
-        label = "Thin edge  (t≈0.35)"
-
-    else:
+    if scenario not in SCENARIO_CONFIG:
         print(f"Unknown scenario '{scenario}'. "
               "Choose: floor_to_wall, wall_to_ceiling, outside, thin_edge")
         sys.exit(1)
 
-    # ------------------------------------------------------------------ #
-    #  Solve IK                                                            #
-    # ------------------------------------------------------------------ #
+    cfg = SCENARIO_CONFIG[scenario]
+    keyframes = cfg["keyframes"]
+    xlim = cfg["xlim"]
+    ylim = cfg["ylim"]
+
+    # Pick the keyframe closest to t=0.45 as a representative mid-transition pose
+    kf = min(keyframes, key=lambda k: abs(k["t"] - 0.45))
+
+    x1, y1, theta1       = kf["x1"], kf["y1"], kf["theta1"]
+    x2, y2, theta2       = kf["x2"], kf["y2"], kf["theta2"]
+    constraint_set       = kf["constraint_set"]
+    wall_x               = kf.get("wall_x",   WALL_X)
+    ceiling_y_kf         = kf.get("ceiling_y", CEILING_Y)
+    edge_x               = kf.get("wall_x",   EDGE_X)    # thin_edge repurposes wall_x
+    edge_y               = kf.get("ceiling_y", EDGE_Y)   # thin_edge repurposes ceiling_y
+
+    label = f"{scenario}  (t≈{kf['t']:.2f})"
+
     print("=" * 60)
     print(f"  Snapshot: {label}")
     print(f"  Constraint set : {constraint_set}")
@@ -154,7 +102,7 @@ def main():
         wg=wg,
         constraint_set=constraint_set,
         wall_x=wall_x,
-        ceiling_y=ceiling_y,
+        ceiling_y=ceiling_y_kf,
         n_grid=360,
     )
 
@@ -168,16 +116,16 @@ def main():
     print(f"    Front: ({x1e:.4f}, {y1e:.4f})")
     print(f"    Back : ({x2e:.4f}, {y2e:.4f})")
     print("-" * 60)
-    for i, qi in enumerate(q, 1):
+
+    # Display q in calf-up convention (q1: 0°=up from front calf, q4: 0°=up from back calf)
+    q_disp = _q_display(q)
+    for i, qi in enumerate(q_disp, 1):
         print(f"  q{i} = {np.degrees(qi):+9.4f}°  ({qi:+.6f} rad)")
     print("=" * 60)
 
-    # ------------------------------------------------------------------ #
-    #  Plot                                                                #
-    # ------------------------------------------------------------------ #
     fig, ax = plt.subplots(figsize=(9, 7))
 
-    _draw_surfaces(ax, constraint_set, wall_x, ceiling_y, xlim, ylim)
+    _draw_surfaces(ax, constraint_set, wall_x, ceiling_y_kf, edge_x, edge_y, xlim, ylim)
 
     plot_robot(
         q,
@@ -188,10 +136,10 @@ def main():
         axle_a_len=wg.bar_len_a,
         wheel_radius=wg.wheel_r,
         calf=wg.calf,
-        thigh=wg.thigh,
         arm_a1=wg.arm_a1, arm_b1=wg.arm_b1,
         arm_a2=wg.arm_a2, arm_b2=wg.arm_b2,
         ax=ax,
+        title=label,
     )
 
     ax.set_xlim(xlim)
@@ -200,7 +148,6 @@ def main():
     ax.grid(True, alpha=0.3, linestyle="--")
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
-    ax.set_title(label, fontsize=11)
     ax.legend(loc="upper right", fontsize=9)
 
     plt.tight_layout()
