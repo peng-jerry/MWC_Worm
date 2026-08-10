@@ -32,15 +32,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from constraints import wheel_centers
 from animate_transition import (
     solve_trajectory, SCENARIO_CONFIG,
-    wg, l1, l2, l3,
+    l1, l2, l3,
     WALL_X, CEILING_Y, EDGE_X, EDGE_Y,
     N_FRAMES,
-    _WTC_T_APPROACH, _WTC_T_ROT_END, _WTC_T_SLIDE_0, _WTC_T_SLIDE_END, _WTC_ROT_DT,
+    _WTC_T_APPROACH, _WTC_T_ROT_END, _WTC_T_GLIDE_END, _WTC_T_SLIDE_A, _WTC_T_SLIDE_END,
+    _WTC_FRONT_ROT_DT, _WTC_ROT_DT, _WTC_POST_HOLD_DT,
     _OUT_T_BACK_ARR, _OUT_T_FRONT_STOP, _OUT_T_ROT1_S, _OUT_T_ROT1_E,
     _OUT_T_BOTH_S, _OUT_T_ROT2_E,
 )
 
-R   = wg.wheel_r   # 0.050 m
 TOL = 0.004
 
 SCENARIO = sys.argv[1] if len(sys.argv) > 1 else "floor_to_wall"
@@ -51,6 +51,7 @@ if SCENARIO not in SCENARIO_CONFIG:
     sys.exit(1)
 
 cfg           = SCENARIO_CONFIG[SCENARIO]
+R             = cfg["wg"].wheel_r
 KEYFRAMES     = cfg["keyframes"]
 N_GRID        = cfg["n_grid"]
 SMOOTH_WEIGHT = cfg["smooth_weight"]
@@ -90,13 +91,14 @@ elif SCENARIO == "wall_to_ceiling":
     def formula_B(w, wp): return  (w[0] - wp[0]) / R     # ceiling: right = +CCW
 
     PHASES = [
-        (t2f(_WTC_T_APPROACH),        "front at corner"),
-        (t2f(_WTC_T_APPROACH + 0.025), "front rotates"),
-        (t2f(_WTC_T_ROT_END),          "front on ceiling"),
-        (t2f(_WTC_T_SLIDE_0),           "both moving"),
-        (t2f(_WTC_T_SLIDE_END),        "back at corner"),
-        (t2f(_WTC_T_SLIDE_END + 0.025), "back rotates"),
-        (t2f(_WTC_T_SLIDE_END + 6*_WTC_ROT_DT), "back on ceiling"),
+        (t2f(_WTC_T_APPROACH),                                          "front at corner"),
+        (t2f(_WTC_T_APPROACH + _WTC_FRONT_ROT_DT / 2),                 "front rotates"),
+        (t2f(_WTC_T_ROT_END),                                           "front on ceiling"),
+        (t2f(_WTC_T_GLIDE_END),                                         "both advance"),
+        (t2f(_WTC_T_SLIDE_A),                                           "front stops"),
+        (t2f(_WTC_T_SLIDE_END),                                         "back at corner"),
+        (t2f(_WTC_T_SLIDE_END + 6*_WTC_ROT_DT),                        "back on ceiling"),
+        (t2f(_WTC_T_SLIDE_END + 6*_WTC_ROT_DT + _WTC_POST_HOLD_DT),   "depart"),
     ]
 
 elif SCENARIO == "outside":
@@ -143,7 +145,7 @@ elif SCENARIO == "thin_edge":
 print(f"{SCENARIO}  ({N_FRAMES} frames)")
 print("-" * 50)
 results = solve_trajectory(
-    KEYFRAMES, wg, l1, l2, l3,
+    KEYFRAMES, cfg["wg"], l1, l2, l3,
     n_frames=N_FRAMES, n_grid=N_GRID,
     smooth_weight=SMOOTH_WEIGHT, cold_at=COLD_AT,
 )
@@ -162,10 +164,11 @@ _qs_disp_rad = np.stack([_q_display(q) for q in _qs_raw])            # (N_FRAMES
 qs = np.degrees(np.unwrap(_qs_disp_rad, axis=0))                     # unwrap to remove ±180° wrap artefacts
 
 # ── Wheel centers ─────────────────────────────────────────────────────────────
-wl1 = np.array([wheel_centers(x1[i], y1[i], th1[i], wg, side= 1)[0] for i in range(N_FRAMES)])
-wr1 = np.array([wheel_centers(x1[i], y1[i], th1[i], wg, side= 1)[1] for i in range(N_FRAMES)])
-wl2 = np.array([wheel_centers(x2[i], y2[i], th2[i], wg, side=-1)[0] for i in range(N_FRAMES)])
-wr2 = np.array([wheel_centers(x2[i], y2[i], th2[i], wg, side=-1)[1] for i in range(N_FRAMES)])
+_wg = cfg["wg"]
+wl1 = np.array([wheel_centers(x1[i], y1[i], th1[i], _wg, side= 1)[0] for i in range(N_FRAMES)])
+wr1 = np.array([wheel_centers(x1[i], y1[i], th1[i], _wg, side= 1)[1] for i in range(N_FRAMES)])
+wl2 = np.array([wheel_centers(x2[i], y2[i], th2[i], _wg, side=-1)[0] for i in range(N_FRAMES)])
+wr2 = np.array([wheel_centers(x2[i], y2[i], th2[i], _wg, side=-1)[1] for i in range(N_FRAMES)])
 
 # ── Angular velocity ──────────────────────────────────────────────────────────
 def compute_omega(wheels):
@@ -203,9 +206,9 @@ ax.plot(frames, omega_bl, label="Back-left",   color="#d62728", lw=1.8)
 ax.plot(frames, omega_br, label="Back-right",  color="#d62728", lw=1.8,
         linestyle="--", dashes=(6, 3))
 ax.axhline(0, color="black", lw=0.6, linestyle=":")
-_OMEGA_LIMIT = 30 * np.radians(7.5)    # 30× 7.5°/fr joint limit  ≈ 3.927 rad/frame
+_OMEGA_LIMIT = 0.70    # operational sliding limit (= _OMEGA_SLIDE in animate_transition)
 ax.axhline( _OMEGA_LIMIT, color="orange", lw=0.8, linestyle="--", alpha=0.6,
-            label=f"ω limit ±{_OMEGA_LIMIT:.3f}")
+            label=f"ω limit ±{_OMEGA_LIMIT:.2f}")
 ax.axhline(-_OMEGA_LIMIT, color="orange", lw=0.8, linestyle="--", alpha=0.6)
 ax.set_ylabel("Angular velocity  (rad / frame)", fontsize=10)
 ax.set_xlim(1, N_FRAMES)
@@ -218,13 +221,13 @@ q_colors = ["#2ca02c", "#ff7f0e", "#9467bd", "#8c564b"]
 for i, (name, col) in enumerate(zip(["q1", "q2", "q3", "q4"], q_colors)):
     ax2.plot(frames, qs[:, i], label=name, color=col, lw=1.8)
 ax2.axhline(  0, color="black", lw=0.5, linestyle=":")
-ax2.axhline(  90, color="red",  lw=0.8, linestyle="--", alpha=0.5, label="+90° limit")
-ax2.axhline( -90, color="red",  lw=0.8, linestyle="--", alpha=0.5)
+ax2.axhline(  95, color="red",  lw=0.8, linestyle="--", alpha=0.5, label="+95° limit")
+ax2.axhline( -95, color="red",  lw=0.8, linestyle="--", alpha=0.5)
 ax2.set_ylabel("Joint angle  (°)", fontsize=10)
 ax2.legend(loc="upper right", fontsize=9, ncol=3)
 ax2.grid(axis="y", alpha=0.3)
 
-_DJOINT_LIM = 7.5    # °/frame joint limit
+_DJOINT_LIM = 7.2    # °/frame joint limit
 dqs = np.diff(qs, axis=0, prepend=qs[[0]])   # dqs[0]=0; dqs[i]=qs[i]−qs[i−1]
 for i, (name, col) in enumerate(zip(["q1", "q2", "q3", "q4"], q_colors)):
     ax3.plot(frames, dqs[:, i], label=name, color=col, lw=1.8)
@@ -247,6 +250,6 @@ for f, label in PHASES:
         ax.text(f + 0.4, yhi * 0.97, label,
                 fontsize=7, color="gray", va="top", rotation=90)
 
-out = os.path.join(os.path.dirname(os.path.abspath(__file__)), OUT_FILE)
+out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wheel_omega", OUT_FILE)
 fig.savefig(out, dpi=150)
 print(f"Saved: {out}")

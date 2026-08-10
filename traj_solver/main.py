@@ -1,18 +1,19 @@
 """
-Snapshot viewer: solve and plot a single characteristic frame from each
-animate_transition.py scenario.
+Snapshot viewer: solve and plot a single characteristic frame from a chosen scenario.
 
 Usage:
     python main.py [scenario]
 
 Scenarios: floor_to_wall (default), wall_to_ceiling, outside, thin_edge
 
+Picks the keyframe nearest t=0.45 as a representative mid-transition pose.
 Geometry and keyframe poses are taken directly from animate_transition.py
 so the output always matches the animation. Joint angles q1/q4 are shown
 in the calf-up display convention (0° = link straight up from the calf).
 """
 
 import sys
+import os
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -103,7 +104,7 @@ def main():
         constraint_set=constraint_set,
         wall_x=wall_x,
         ceiling_y=ceiling_y_kf,
-        n_grid=360,
+        n_grid=cfg["n_grid"] * 6,
     )
 
     x1e, y1e = info["x1"], info["y1"]
@@ -151,7 +152,9 @@ def main():
     ax.legend(loc="upper right", fontsize=9)
 
     plt.tight_layout()
-    out = "robot_config.png"
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    out = os.path.join(_script_dir, "robot_configs", f"robot_config_{scenario}.png")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
     fig.savefig(out, dpi=150)
     print(f"\n  Saved → {out}")
     plt.close(fig)
