@@ -1,118 +1,173 @@
 """
-Inverse kinematics solver: find q1-q4 given front/back assembly poses.
+solver.py — closed-chain inverse kinematics for one pair of assembly poses.
 
-Strategy
---------
-The problem has 3 hard constraints (x2, y2, theta2) and 4 unknowns (q1-q4),
-leaving 1 DOF.  We exploit the structure:
+The chain
+---------
+The front assembly sits at (x1, y1, θ1) and the back assembly at (x2, y2, θ2).
+Four joints connect them through three links:
 
-  - For any fixed q1, the remaining chain (l2, l3) is a standard 2-link IK
-    problem that can be solved analytically (law of cosines).  That gives
-    exact (q2, q3), and q4 follows from the orientation constraint.
-  - We sweep q1 over a dense grid, keep all feasible solutions, then pick
-    the one that minimises the sum of squared joint angles (neutral posture).
-  - A final BFGS polish is applied to the best candidate.
+    P0 --l1-- P1 --l2-- P2 --l3-- P3
+    q1 at P0 (relative to θ1), q2 at P1, q3 at P2, q4 at P3 (sets the back
+    assembly's orientation)
+
+Closing the chain fixes three things — P3's x and y, and the back assembly's
+orientation θ2 — while there are four joints, so one degree of freedom is
+left free.  This module parametrises that free DOF by q1:
+
+  * Fix q1.  P1 is then known, and links l2 and l3 must reach from P1 to P3:
+    a two-link problem solved exactly by the law of cosines.  It has two
+    solutions, the elbow branches (sign = +1 gives q3 <= 0, the inward bend
+    every scenario uses).
+  * q4 then follows from the orientation, so every (q1, branch) candidate
+    closes the chain exactly — there is no kinematic residual to minimise.
+
+Choosing q1 is therefore a 1-D search.  `solve_ik` does it for a single pose
+(grid over q1 on both branches, then a bounded 1-D refinement); the
+trajectory solver (trajectory_ik.py) does it for every frame at once.
+
+Shared building blocks used by trajectory_ik.py:
+    solve_branch_batch   closed-form q for many q1 values on one branch
+    posture_cost         neutral-posture tie-breaker
+    prepare_pose         snap assembly poses onto their surfaces
 """
 
 import numpy as np
-from scipy.optimize import minimize
+from scipy.optimize import minimize_scalar
 
 from kinematics import forward_kinematics, reachability_check
-from constraints import (WheelGeometry, total_penalty,
+from constraints import (WheelGeometry,
                          apply_floor_constraint, apply_wall_constraint,
                          apply_ceiling_constraint, apply_outside_constraint,
                          apply_thin_edge_constraint,
-                         _joint_limit_penalty,
                          CONSTRAINT_SETS)
+from constraints_batch import evaluate_batch
+
+
+# Weight of the neutral-posture term ||q_display||² (see posture_cost).  It is
+# only a tie-breaker between candidates the other costs rate (nearly) equally,
+# so it is kept small: at weight ~1 it would compete with the smoothness term
+# and pull the joints toward neutral even when the assemblies are still.
+POSTURE_WEIGHT = 1e-3
+
+# Display convention (kinematics.q_display): q1 and q4 are measured from
+# "straight up from the calf", q2 and q3 as-is.  q_display = wrap(q + shift).
+_DISPLAY_SHIFT = np.array([-np.pi / 2, 0.0, 0.0, -np.pi / 2])
+
+# Cost returned for q1 values where the two-link sub-chain cannot close, so
+# the bounded 1-D refinement steers away from them.
+_UNREACHABLE = 1e30
+
+
+def _wrap(a):
+    """Wrap angles to [-π, π)."""
+    return (a + np.pi) % (2 * np.pi) - np.pi
 
 
 # ------------------------------------------------------------------ #
-#  Two-link analytical IK                                             #
+#  Closed-form configurations along the free DOF                      #
 # ------------------------------------------------------------------ #
 
-def _two_link_ik(px, py, l2, l3):
+def solve_branch_batch(q1, sign, x1, y1, theta1, x2, y2, theta2, l1, l2, l3):
     """
-    Solve the 2-link planar IK: place the tip of (l2, l3) at (px, py).
+    Joint angles for an array of q1 values on one elbow branch.
 
-    Returns list of (phi2, phi3) absolute-angle pairs (0, 1, or 2 solutions).
-    phi2 is the absolute angle of link l2 from the X-axis; phi3 for l3.
+    Parameters
+    ----------
+    q1 : array-like (K,)
+        Values of the free joint q1 (radians).
+    sign : +1.0 or -1.0
+        Elbow branch of the l2/l3 sub-chain; +1 gives q3 <= 0.
+    x1, y1, theta1, x2, y2, theta2 : float
+        Effective assembly poses (after prepare_pose).
+    l1, l2, l3 : float
+        Link lengths.
+
+    Returns
+    -------
+    Q : ndarray (K, 4)
+        [q1, q2, q3, q4] per row, wrapped to [-π, π).  Rows are NaN where the
+        sub-chain cannot reach P3 from that q1.  Every finite row closes the
+        chain exactly.
     """
+    q1 = np.asarray(q1, dtype=float)
+    phi1 = theta1 + q1                       # absolute direction of link l1
+    # Vector from P1 to P3: the target for the two-link sub-chain (l2, l3).
+    px = x2 - (x1 + l1 * np.cos(phi1))
+    py = y2 - (y1 + l1 * np.sin(phi1))
     d2 = px ** 2 + py ** 2
     d = np.sqrt(d2)
 
-    # Law of cosines: cos(q3) = (d^2 - l2^2 - l3^2) / (2*l2*l3)
+    # Law of cosines for the elbow angle: cos(q3) = (d² - l2² - l3²) / (2 l2 l3).
+    # |cos q3| > 1 means P3 is out of the sub-chain's reach for this q1.
     cos_q3 = (d2 - l2 ** 2 - l3 ** 2) / (2.0 * l2 * l3)
-    if abs(cos_q3) > 1.0:
-        return []  # out of reach
+    reachable = np.abs(cos_q3) <= 1.0
 
-    alpha = np.arctan2(py, px)  # direction from base to target
-
-    # Law of cosines: cos(beta) = (d^2 + l2^2 - l3^2) / (2*d*l2)
-    cos_beta = (d2 + l2 ** 2 - l3 ** 2) / (2.0 * d * l2)
-    cos_beta = np.clip(cos_beta, -1.0, 1.0)  # numerical safety
+    # Law of cosines for the angle beta between P1→P3 and link l2:
+    # cos(beta) = (d² + l2² - l3²) / (2 d l2).  Clipped for rounding at full
+    # extension; d = 0 only happens for unreachable rows, which are masked.
+    alpha = np.arctan2(py, px)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cos_beta = np.clip((d2 + l2 ** 2 - l3 ** 2) / (2.0 * d * l2), -1.0, 1.0)
     beta = np.arccos(cos_beta)
 
-    solutions = []
-    for sign in (+1.0, -1.0):           # elbow-up and elbow-down
-        phi2 = alpha + sign * beta
-        q3 = -sign * np.arccos(cos_q3)  # opposite sign: phi2=alpha+beta → q3 bends back
-        phi3 = phi2 + q3
-        solutions.append((phi2, phi3))
-    return solutions
+    # Branch: l2 turns by +beta (sign +1) or -beta from P1→P3, and the elbow
+    # bends back by the opposite sign so l3 ends on P3.
+    phi2 = alpha + sign * beta
+    q3 = -sign * np.arccos(np.clip(cos_q3, -1.0, 1.0))
+    phi3 = phi2 + q3
+
+    # Relative joint angles; q4 makes the back assembly's orientation theta2.
+    Q = _wrap(np.stack([q1, phi2 - phi1, phi3 - phi2, theta2 - phi3], axis=-1))
+    Q[~reachable] = np.nan
+    return Q
+
+
+def _solve_branch(q1, sign, *kin_args):
+    """solve_branch_batch for one q1; returns the q-vector or None if unreachable."""
+    q = solve_branch_batch(np.array([q1], dtype=float), sign, *kin_args)[0]
+    return None if np.isnan(q[0]) else q
+
+
+def posture_cost(Q):
+    """
+    Neutral-posture tie-breaker for candidate rows Q (K, 4): POSTURE_WEIGHT ×
+    ||q_display||².  Display zero (q1/q4 straight up from the calf, q2/q3
+    straight) is the centre of the joint-limit range used in constraints.py.
+    """
+    qd = _wrap(Q + _DISPLAY_SHIFT)
+    return POSTURE_WEIGHT * np.sum(qd * qd, axis=1)
 
 
 # ------------------------------------------------------------------ #
-#  Full chain solver                                                  #
+#  Assembly poses                                                     #
 # ------------------------------------------------------------------ #
 
-def _smooth_cost(q: np.ndarray, q_ref: np.ndarray, smooth_weight: float) -> float:
-    """Squared angle-wrapped distance from q to q_ref, scaled by smooth_weight."""
-    if smooth_weight == 0.0:
-        return 0.0
-    dq = (q - q_ref + np.pi) % (2 * np.pi) - np.pi
-    return smooth_weight * float(np.dot(dq, dq))
-
-
-def _objective(q, x1, y1, theta1, x2, y2, theta2, l1, l2, l3,
-               wg, constraint_set, wall_x, ceiling_y, q_ref, smooth_weight,
-               pen_weight=1e4):
-    """Kinematic residual + constraint penalty + trajectory smoothness (for BFGS polish)."""
-    positions, theta_end = forward_kinematics(q, x1, y1, theta1, l1, l2, l3)
-    p3 = positions[-1]
-    dx = p3[0] - x2
-    dy = p3[1] - y2
-    dtheta = np.arctan2(np.sin(theta_end - theta2), np.cos(theta_end - theta2))
-    kin = float(dx ** 2 + dy ** 2 + dtheta ** 2)
-    pen = total_penalty(q, x1, y1, theta1, x2, y2, theta2, l1, l2, l3,
-                        wg, constraint_set, wall_x=wall_x, ceiling_y=ceiling_y,
-                        weight=pen_weight)
-    return kin + pen + _smooth_cost(q, q_ref, smooth_weight)
-
-
-def _solve_for_q1(q1, x1, y1, theta1, x2, y2, theta2, l1, l2, l3):
+def prepare_pose(x1, y1, theta1, x2, y2, theta2, wg, constraint_set,
+                 wall_x=0.0, ceiling_y=3.0):
     """
-    Given q1, analytically solve for q2, q3, q4.
-    Returns list of q-vectors (possibly empty, or 1-2 solutions).
+    Snap both assembly poses so their wheels touch the constraint set's
+    surface(s), using the constraints.apply_*_constraint functions.  The
+    *_exact sets and "none" use the given positions unchanged.
+
+    Returns the effective (x1, y1, x2, y2); orientations are not changed.
     """
-    phi1 = theta1 + q1
-    p1x = x1 + l1 * np.cos(phi1)
-    p1y = y1 + l1 * np.sin(phi1)
+    if constraint_set == "floor":
+        y1, y2 = apply_floor_constraint(x1, theta1, x2, theta2, wg)
+    elif constraint_set == "wall":
+        x1, y1, x2, y2 = apply_wall_constraint(x1, y1, theta1, x2, y2, theta2, wg, wall_x)
+    elif constraint_set == "ceiling":
+        x1, y1, x2, y2 = apply_ceiling_constraint(x1, y1, theta1, x2, y2, theta2, wg, wall_x, ceiling_y)
+    elif constraint_set == "outside":
+        x1, y1, x2, y2 = apply_outside_constraint(x1, y1, theta1, x2, y2, theta2, wg, wall_x, ceiling_y)
+    elif constraint_set == "thin_edge":
+        # thin_edge repurposes ceiling_y as edge_y and wall_x as edge_x.
+        x1, y1, x2, y2 = apply_thin_edge_constraint(x1, y1, theta1, x2, y2, theta2, wg, ceiling_y, wall_x)
+    return x1, y1, x2, y2
 
-    # Remaining target for the 2-link chain rooted at p1
-    dx = x2 - p1x
-    dy = y2 - p1y
 
-    results = []
-    for phi2, phi3 in _two_link_ik(dx, dy, l2, l3):
-        q2 = phi2 - phi1
-        q3 = phi3 - phi2
-        q4 = theta2 - phi3
-        # Wrap to [-pi, pi]
-        q_vec = np.array([q1, q2, q3, q4])
-        q_vec = (q_vec + np.pi) % (2 * np.pi) - np.pi
-        results.append(q_vec)
-    return results
-
+# ------------------------------------------------------------------ #
+#  Single-pose solve                                                  #
+# ------------------------------------------------------------------ #
 
 def solve_ik(
     x1, y1, theta1,
@@ -128,73 +183,67 @@ def solve_ik(
     tol=1e-7,
 ):
     """
-    Find joint angles [q1, q2, q3, q4] connecting the two wheel assemblies.
+    Joint angles [q1, q2, q3, q4] connecting the two wheel assemblies at one pose.
+
+    For whole trajectories use animate_transition.solve_trajectory, which
+    chooses every frame's joint angles together (trajectory_ik.py).  This
+    function is for single poses: snapshots, and showing a keyframe pose with
+    the joint angles closest to a given reference (q_init).
+
+    Cost of a candidate q (lowest wins):
+        constraint penalty (constraints_batch.evaluate_batch)
+      + smooth_weight · ||wrap(q - q_init)||²      (only when q_init is given)
+      + posture_cost(q)
 
     Parameters
     ----------
-    x1, y1, theta1 : float
-        Front assembly position and orientation (radians).
-    x2, y2, theta2 : float
-        Back assembly position and orientation (radians).
+    x1, y1, theta1, x2, y2, theta2 : float
+        Front / back assembly poses (radians); snapped to the constraint
+        set's surfaces by prepare_pose before solving.
     l1, l2, l3 : float
-        Link lengths (must be positive).
+        Link lengths.
     wg : WheelGeometry, optional
-        Wheel/wishbone geometry needed for collision checking.
-        Defaults to WheelGeometry() if not provided.
-    constraint_set : {"none", "floor"}
-        Active constraint set.  "none" runs a purely kinematic IK.
-        "floor" auto-adjusts y1/y2 for wheel-ground contact and penalises
-        the linkage for going below the floor.
-    q_init : array-like of shape (4,), optional
-        Warm-start guess for the joint angles.  When provided, the candidate
-        scoring also penalises deviation from this reference by smooth_weight.
+        Wheel/wishbone geometry for the collision terms (default WheelGeometry()).
+    constraint_set : str
+        One of constraints.CONSTRAINT_SETS.
+    wall_x, ceiling_y : float
+        Environment geometry (thin_edge reuses them as edge_x, edge_y).
+    q_init : array-like (4,), optional
+        Reference configuration to stay close to.
     smooth_weight : float
-        Weight on the trajectory-smoothness term ||q - q_init||² (angle-wrapped).
-        Only applied when q_init is provided.  A value of 1.0 adds a term
-        comparable in scale to the neutral-posture cost ||q||².
+        Weight on the distance to q_init.
     n_grid : int
-        Number of q1 values sampled in [-pi, pi] for the global grid sweep.
+        q1 grid points over [-π, π) for the global sweep; the best grid
+        candidate is then refined continuously within one grid step.
     tol : float
-        Kinematic residual norm below which the solution is declared successful.
+        Kinematic residual below which the solve counts as successful.
 
     Returns
     -------
-    q : ndarray of shape (4,)
-        Best joint angles [q1, q2, q3, q4] in radians.
+    q : ndarray (4,)
+        Joint angles in radians.
     success : bool
-        True if the kinematic residual norm is below `tol`.
+        True if the kinematic residual is below tol (always, unless the
+        assemblies are out of reach).
     info : dict
-        'residual_norm', 'position_error', 'orientation_error' (rad),
-        'constraint_set', 'y1', 'y2' (effective assembly heights used).
+        residual_norm, position_error, orientation_error (rad);
+        constraint_set; x1, y1, x2, y2 (effective poses after prepare_pose);
+        cost (total candidate cost); penalty (constraint part); branch
+        (elbow sign); extension (|P3 - P0| / (l1 + l2 + l3));
+        feasible (q satisfies every hard constraint); violations ({hard
+        term: raw value} q breaks); grid_feasible / grid_candidates (how many
+        grid candidates satisfy every hard constraint); blocking (when none
+        do: the hard terms the least-violating candidate still breaks, i.e.
+        why the pose itself is infeasible).
     """
     if constraint_set not in CONSTRAINT_SETS:
         raise ValueError(f"Unknown constraint set '{constraint_set}'. "
                          f"Valid options: {CONSTRAINT_SETS}")
-
     if wg is None:
         wg = WheelGeometry()
 
-    # --- Pre-processing: adjust poses so wheels contact the right surface(s) ---
-    if constraint_set == "floor":
-        y1, y2 = apply_floor_constraint(x1, theta1, x2, theta2, wg)
-    elif constraint_set == "wall":
-        x1, y1, x2, y2 = apply_wall_constraint(x1, y1, theta1, x2, y2, theta2, wg, wall_x)
-    elif constraint_set == "ceiling":
-        x1, y1, x2, y2 = apply_ceiling_constraint(x1, y1, theta1, x2, y2, theta2, wg, wall_x, ceiling_y)
-    elif constraint_set == "ceiling_exact":
-        pass  # exact pivot positions from keyframes; skip contact adjustment
-    elif constraint_set == "outside":
-        x1, y1, x2, y2 = apply_outside_constraint(x1, y1, theta1, x2, y2, theta2, wg, wall_x, ceiling_y)
-    elif constraint_set == "wall_exact":
-        pass  # exact positions from keyframes; skip contact adjustment
-    elif constraint_set == "outside_exact":
-        pass  # exact pivot positions from keyframes; skip contact adjustment
-    elif constraint_set == "thin_edge_exact":
-        pass  # exact pivot positions from keyframes; skip contact adjustment
-    elif constraint_set == "thin_edge":
-        # ceiling_y is repurposed as edge_y; wall_x as edge_x (right terminus).
-        x1, y1, x2, y2 = apply_thin_edge_constraint(x1, y1, theta1, x2, y2, theta2, wg, ceiling_y, wall_x)
-
+    x1, y1, x2, y2 = prepare_pose(x1, y1, theta1, x2, y2, theta2, wg, constraint_set,
+                                  wall_x, ceiling_y)
     if not reachability_check(x1, y1, x2, y2, l1, l2, l3):
         dist = np.hypot(x2 - x1, y2 - y1)
         raise ValueError(
@@ -202,115 +251,64 @@ def solve_ik(
             f"distance {dist:.3f} > total link length {l1+l2+l3:.3f}."
         )
 
-    kin_args  = (x1, y1, theta1, x2, y2, theta2, l1, l2, l3)
+    kin_args = (x1, y1, theta1, x2, y2, theta2, l1, l2, l3)
+    q_ref = np.asarray(q_init, dtype=float) if q_init is not None else None
 
-    # Smoothness reference: only meaningful when a previous solution is available.
-    q_ref      = np.asarray(q_init, dtype=float) if q_init is not None else np.zeros(4)
-    eff_smooth = smooth_weight if q_init is not None else 0.0
-    full_args  = (*kin_args, wg, constraint_set, wall_x, ceiling_y, q_ref, eff_smooth)
+    def evaluate(Q):
+        """Penalty batch and total cost for candidate rows Q."""
+        Q = np.atleast_2d(Q)
+        pb = evaluate_batch(Q, *kin_args, wg, constraint_set,
+                            wall_x=wall_x, ceiling_y=ceiling_y)
+        cost = pb.total + posture_cost(Q)
+        if q_ref is not None and smooth_weight != 0.0:
+            dq = _wrap(Q - q_ref)
+            cost = cost + smooth_weight * np.sum(dq * dq, axis=1)
+        return pb, cost
 
-    # --- Grid sweep over q1 ---
-    # For the "outside" / "thin_edge" constraints, track the lowest
-    # (penalty + smooth) grid candidate separately and use it directly —
-    # BFGS can drift off the constraint surface in these penalty landscapes.
-    candidates = []
-    best_pen_val = np.inf
-    best_pen_q   = None
+    # --- Global sweep: q1 grid × both branches, scored in one batch ---
+    # Rows are ordered (q1_0, +1), (q1_0, -1), (q1_1, +1), ... so argmin breaks
+    # ties toward lower q1 and the +1 branch.
+    q1_grid = np.linspace(-np.pi, np.pi, n_grid, endpoint=False)
+    signs = (+1.0, -1.0)
+    Q = np.stack([solve_branch_batch(q1_grid, s, *kin_args) for s in signs],
+                 axis=1).reshape(-1, 4)
+    valid = np.flatnonzero(~np.isnan(Q[:, 0]))
+    if valid.size == 0:
+        raise RuntimeError("No closed-chain configuration found on the q1 grid.")
 
-    for q1_val in np.linspace(-np.pi, np.pi, n_grid, endpoint=False):
-        for q_vec in _solve_for_q1(q1_val, *kin_args):
-            kin_cost    = float(np.dot(q_vec, q_vec))
-            pen_cost    = total_penalty(q_vec, *kin_args, wg, constraint_set,
-                                        wall_x=wall_x, ceiling_y=ceiling_y)
-            smooth_cost = _smooth_cost(q_vec, q_ref, eff_smooth)
-            total_cost  = kin_cost + pen_cost + smooth_cost
-            candidates.append((total_cost, q_vec))
-            if constraint_set in ("outside", "outside_exact",
-                                    "thin_edge", "thin_edge_exact"):
-                # Tie-break by kin_cost (neutral posture) when penalties are equal.
-                # Weight 0.001 is negligible during warm frames where smooth_cost
-                # dominates, but matters at cold restarts where smooth_cost=0 and
-                # pen≈0 for many candidates — without it, grid order determines the
-                # winner, which can land on a degenerate branch far from neutral.
-                combined = pen_cost + smooth_cost + 0.001 * kin_cost
-                if combined < best_pen_val:
-                    best_pen_val = combined
-                    best_pen_q   = q_vec.copy()
+    grid_pb, grid_cost = evaluate(Q[valid])
+    i = int(np.argmin(grid_cost))
+    best_q1   = q1_grid[valid[i] // 2]
+    best_sign = signs[valid[i] % 2]
+    best_q    = Q[valid[i]]
+    best_cost = float(grid_cost[i])
 
-    if not candidates:
-        raise RuntimeError("No feasible configuration found on the q1 grid.")
+    # --- Continuous refinement of q1 on the winning branch ---
+    # Every q1 on the branch closes the chain exactly, so this only moves
+    # along the free DOF; the grid optimum lies within one step of the true one.
+    def branch_cost(q1):
+        q_vec = _solve_branch(q1, best_sign, *kin_args)
+        return _UNREACHABLE if q_vec is None else float(evaluate(q_vec)[1][0])
 
-    candidates.sort(key=lambda t: t[0])
-    top_seeds = [q for _, q in candidates[:min(10, len(candidates))]]
-
-    # --- Polish ---
-    best_q   = top_seeds[0].copy()
-    best_val = np.inf
-
-    if constraint_set in ("outside", "outside_exact",
-                           "thin_edge", "thin_edge_exact"):
-        # Grid candidates are analytically exact (zero kinematic residual).
-        # Powell / BFGS can drift off the constraint surface in crossing-penalty
-        # landscapes where local minima exist at non-zero kinematic residual
-        # (e.g. chain routes the wrong way around the corner/terminus).
-        # Use the best-penalty grid candidate directly to guarantee zero residual.
-        best_q = best_pen_q if best_pen_q is not None else top_seeds[0].copy()
-
-    else:
-        # Polish with smooth_weight=0 and pen_weight=0 so BFGS minimises only
-        # the kinematic residual.  With pen_weight=1e4 (default), the hard-
-        # penalty gradient dominates at kin_res≈0 (where ∂kin/∂q≈0), causing
-        # BFGS to drift away from analytically-exact grid seeds.
-        # grid scoring still uses eff_smooth so the warm branch is preferred;
-        # BFGS itself must use 0 to avoid the false-minimum at q_prev (see
-        # solver notes: f(q_prev)=kin_res²≈0 dominates 200·||Δq||² for small
-        # per-frame geometry changes, freezing the solver).
-        wall_smooth = 0.0
-        polish_args = (*kin_args, wg, constraint_set, wall_x, ceiling_y,
-                       q_ref, wall_smooth, 0.0)   # pen_weight=0
-        converged = []
-        for q0 in top_seeds:
-            result = minimize(
-                _objective, q0, args=polish_args, method="BFGS",
-                options={"gtol": 1e-14, "maxiter": 5_000},
-            )
-            q_cand = (result.x + np.pi) % (2 * np.pi) - np.pi
-            # Measure kinematic residual directly (result.fun == kin_res² here).
-            pos_c, th_c = forward_kinematics(q_cand, x1, y1, theta1, l1, l2, l3)
-            pe = float(np.hypot(pos_c[-1][0] - x2, pos_c[-1][1] - y2))
-            ae = float(abs(np.arctan2(np.sin(th_c - theta2), np.cos(th_c - theta2))))
-            if float(np.sqrt(pe**2 + ae**2)) < tol:
-                # Penalise |q1| or |q4| >= 135° heavily so the selector always
-                # prefers a sub-135° solution when one exists among converged
-                # candidates.  This fixes the warm-chain bias that lets BFGS
-                # drift to q4>135° while ignoring the qlim penalty (pen_weight=0
-                # during BFGS means the penalty is invisible to the optimiser).
-                _hard_lim_disp = np.radians(105.0)
-                _hard_pen = 0.0
-                for _qi in (0, 3):
-                    _q_disp_val = float(q_cand[_qi]) - np.pi / 2
-                    _exc = abs(_q_disp_val) - _hard_lim_disp
-                    if _exc > 0.0:
-                        _hard_pen += 1.0 + _exc * _exc
-                _soft_pen = 8.0 * _joint_limit_penalty(q_cand) * 1e4
-                sel = result.fun + _hard_pen * 1e4 + _soft_pen + _smooth_cost(q_cand, q_ref, eff_smooth)
-                converged.append((sel, q_cand))
-
-        if converged:
-            converged.sort(key=lambda t: t[0])
-            best_q = converged[0][1]
-        # else: keep top_seeds[0] — the analytically-exact grid seed
-
-    best_q = (best_q + np.pi) % (2 * np.pi) - np.pi
+    step = 2 * np.pi / n_grid
+    res = minimize_scalar(branch_cost, bounds=(best_q1 - step, best_q1 + step),
+                          method="bounded", options={"xatol": 1e-8})
+    if res.fun < best_cost:
+        best_q    = _solve_branch(res.x, best_sign, *kin_args)
+        best_cost = float(res.fun)
 
     # --- Diagnostics ---
     positions, theta_end = forward_kinematics(best_q, x1, y1, theta1, l1, l2, l3)
     p3 = positions[-1]
     pos_err = float(np.hypot(p3[0] - x2, p3[1] - y2))
-    ang_err = float(abs(np.arctan2(
-        np.sin(theta_end - theta2), np.cos(theta_end - theta2)
-    )))
+    ang_err = float(abs(_wrap(theta_end - theta2)))
     residual_norm = float(np.sqrt(pos_err ** 2 + ang_err ** 2))
+
+    best_pb, _ = evaluate(best_q)
+    grid_ok = grid_pb.feasible
+    blocking = {}
+    if not grid_ok.any():
+        blocking = grid_pb.violations(int(np.argmin(grid_pb.hard_violation)))
 
     info = {
         "residual_norm":     residual_norm,
@@ -319,5 +317,14 @@ def solve_ik(
         "constraint_set":    constraint_set,
         "x1": x1, "y1": y1,
         "x2": x2, "y2": y2,
+        "cost":            best_cost,
+        "penalty":         float(best_pb.total[0]),
+        "branch":          best_sign,
+        "extension":       float(np.hypot(x2 - x1, y2 - y1) / (l1 + l2 + l3)),
+        "feasible":        bool(best_pb.feasible[0]),
+        "violations":      best_pb.violations(0),
+        "grid_feasible":   int(grid_ok.sum()),
+        "grid_candidates": int(valid.size),
+        "blocking":        blocking,
     }
     return best_q, residual_norm < tol, info

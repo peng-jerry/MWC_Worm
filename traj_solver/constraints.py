@@ -30,26 +30,56 @@ from kinematics import forward_kinematics
 #  Robot geometry                                                     #
 # ------------------------------------------------------------------ #
 
+# Measured assembly dimensions (side view, theta=0, both wheels on the floor):
+#
+#              spine axis (chain joint)
+#                  |
+#                  |  calf
+#                  |
+#                V-apex
+#               /   \
+#        arm B /     \ arm A
+#        45°  /       \
+#           (B)-------(A)
+#            |<-63.0->|<-20.19->|   (apex is 20.19 mm behind wheel A)
+#            |<----- 83.19 ---->|
+#
+# SPINE_HEIGHT is spine axis → wheel-centre line; the V-apex sits
+# APEX_HEIGHT above the wheel centres, the calf covers the rest.
+SPINE_HEIGHT = 0.17685                              # spine axis to wheel centre (m)
+WHEELBASE    = 0.08319                              # wheel centre-to-centre (m)
+ARM_A_DX     = 0.02019                              # V-apex to arm A wheel, horizontal (m)
+ARM_B_ANGLE  = np.pi / 4                            # arm B elevation at its wheel (45°)
+ARM_B_DX     = WHEELBASE - ARM_A_DX                 # V-apex to arm B wheel, horizontal (0.063 m)
+APEX_HEIGHT  = ARM_B_DX * np.tan(ARM_B_ANGLE)       # V-apex above wheel centres (0.063 m)
+CALF_LEN     = SPINE_HEIGHT - APEX_HEIGHT           # 0.11385 m
+BAR_LEN_A    = np.hypot(ARM_A_DX, APEX_HEIGHT)      # ≈ 0.06616 m
+BAR_LEN_B    = np.hypot(ARM_B_DX, APEX_HEIGHT)      # ≈ 0.08910 m
+ARM_A_OFFSET = np.arctan2(ARM_A_DX, APEX_HEIGHT)    # ≈ 17.77° from vertical
+ARM_B_OFFSET = np.arctan2(ARM_B_DX, APEX_HEIGHT)    # = 45°   from vertical
+
+
 @dataclass
 class WheelGeometry:
     """Physical dimensions of the wheel assemblies."""
-    bar_len:   float = 0.140      # arm B length from V-apex to wheel centre
-    wheel_r:   float = 0.050      # wheel radius
+    bar_len:   float = BAR_LEN_B  # arm B length from V-apex to wheel centre
+    wheel_r:   float = 0.025      # wheel radius (50 mm diameter)
     # Per-assembly arm offsets from centreline c = theta − π/2.
-    # Wheel direction from axle = c + arm_angle.  Positive → forward-leaning; negative → backward.
-    arm_a1: float = 0.0                                  # front assembly, arm A (straight down at θ=0)
-    arm_b1: float = np.arctan(0.1263 / 0.125)           # front assembly, arm B (~45.3° forward at θ=0)
-    arm_a2: float = 0.0                                  # back assembly,  arm A (straight down at θ=0)
-    arm_b2: float = -np.arctan(0.1263 / 0.125)          # back assembly,  arm B (~−45.3° backward at θ=0)
-    calf:   float = 0.0921       # strut from chain joint to V-apex (perpendicular to theta)
-    bar_len_a: float = 0.125     # arm A length; pass None to auto-derive from bar_len/arm_b1
+    # Wheel direction from axle = c + arm_angle.  Positive → +x at θ=0; negative → −x.
+    # Arm A and arm B always lean to opposite sides of the centreline.
+    arm_a1: float = -ARM_A_OFFSET    # front assembly, arm A (~−17.8°, outboard at θ=0)
+    arm_b1: float =  ARM_B_OFFSET    # front assembly, arm B (+45°, inboard at θ=0)
+    arm_a2: float =  ARM_A_OFFSET    # back assembly,  arm A (~+17.8°, outboard at θ=0)
+    arm_b2: float = -ARM_B_OFFSET    # back assembly,  arm B (−45°, inboard at θ=0)
+    calf:   float = CALF_LEN     # strut from chain joint to V-apex (perpendicular to theta)
+    bar_len_a: float = BAR_LEN_A # arm A length; pass None to auto-derive from bar_len/arm_b1/arm_a1
 
     def __post_init__(self):
         if self.bar_len_a is None:
-            # arm_a (straight-down, arm_a=0) length that puts arm_a wheel at the same
-            # surface height as arm_b at angle arm_b1.  Equal y-projection at theta=0:
-            #   bar_len_a = bar_len * |sin(-π/2 + arm_b1)| = bar_len * cos(arm_b1)
-            self.bar_len_a = self.bar_len * abs(np.sin(-np.pi / 2 + self.arm_b1))
+            # arm_a length that puts the arm_a wheel at the same surface height as
+            # arm_b at theta=0 (equal y-projection → simultaneous floor contact):
+            #   bar_len_a * cos(arm_a1) = bar_len * cos(arm_b1)
+            self.bar_len_a = self.bar_len * abs(np.cos(self.arm_b1)) / abs(np.cos(self.arm_a1))
 
 
 CONSTRAINT_SETS = ("none", "floor", "wall", "wall_exact", "ceiling", "ceiling_exact", "outside", "outside_exact", "thin_edge", "thin_edge_exact")
@@ -286,7 +316,8 @@ def _v_cone_entry_penalty(
 def _joint_limit_penalty(q: np.ndarray, soft_deg: float = 90.0) -> float:
     """Soft quadratic penalty when any joint exceeds ±90° in display convention.
     Display: q1_disp = q1_int - π/2, q4_disp = q4_int - π/2, q2/q3 unchanged.
-    Onset at ±soft_deg (default 90°), hard wall enforced by solver at ±105°.
+    Onset at ±soft_deg (default 90°); the ±105° hard wall is
+    _joint_hard_limit_penalty.
     """
     _soft = np.radians(soft_deg)
     penalty = 0.0
@@ -298,6 +329,22 @@ def _joint_limit_penalty(q: np.ndarray, soft_deg: float = 90.0) -> float:
         exc = abs(_q_disp) - _soft
         if exc > 0.0:
             penalty += exc * exc
+    return penalty
+
+
+def _joint_hard_limit_penalty(q: np.ndarray, hard_deg: float = 105.0) -> float:
+    """Hard wall when any joint exceeds ±hard_deg in display convention.
+
+    The 1.0 step makes any hard-limit violation cost more than every soft
+    excursion, so a candidate inside the limits always wins when one exists.
+    """
+    _hard = np.radians(hard_deg)
+    penalty = 0.0
+    for _q_disp in (float(q[0]) - np.pi / 2, float(q[1]), float(q[2]),
+                    float(q[3]) - np.pi / 2):
+        exc = abs((_q_disp + np.pi) % (2 * np.pi) - np.pi) - _hard
+        if exc > 0.0:
+            penalty += 1.0 + exc * exc
     return penalty
 
 
@@ -722,6 +769,7 @@ def total_penalty(
 
     _lim_mult = 8.0 if constraint_set in ("wall", "wall_exact", "ceiling", "ceiling_exact") else 1.0
     pen += _lim_mult * _joint_limit_penalty(q)
+    pen += _joint_hard_limit_penalty(q)
 
     result = weight * pen
     if constraint_set in ("outside", "outside_exact"):

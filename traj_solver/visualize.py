@@ -5,6 +5,9 @@ Matplotlib visualization of the robot configuration.
 import numpy as np
 import matplotlib.pyplot as plt
 from kinematics import forward_kinematics, q_display as _q_display
+from constraints import WheelGeometry
+
+_WG = WheelGeometry()   # default (measured) assembly geometry
 
 
 def plot_robot(
@@ -12,12 +15,12 @@ def plot_robot(
     x1, y1, theta1,
     x2, y2, theta2,
     l1, l2, l3,
-    axle_half_length=0.140,
-    axle_a_len=None,
-    wheel_radius=0.050,
-    calf=0.0921,
-    arm_a1=0.0, arm_b1=np.arccos(0.79382),
-    arm_a2=0.0, arm_b2=-np.arccos(0.79382),
+    axle_half_length=_WG.bar_len,
+    axle_a_len=_WG.bar_len_a,
+    wheel_radius=_WG.wheel_r,
+    calf=_WG.calf,
+    arm_a1=_WG.arm_a1, arm_b1=_WG.arm_b1,
+    arm_a2=_WG.arm_a2, arm_b2=_WG.arm_b2,
     ax=None,
     title=None,
     marker_scale=1.0,
@@ -80,7 +83,7 @@ def plot_robot(
         for i, j, length in link_pairs:
             mid = 0.5 * (positions[i] + positions[j])
             ax.annotate(
-                f"l={length:.2f}",
+                f"l={length:.3f}",
                 xy=mid, xytext=(5, -12), textcoords="offset points",
                 fontsize=7, color="gray",
             )
@@ -111,8 +114,8 @@ def plot_robot(
 
 
 def _draw_assembly(ax, joint_pos, theta, bar_len, wheel_r, color, label,
-                   arm_a=0.0, arm_b=np.arccos(0.79382),
-                   calf=0.0921, side=1, bar_len_a=None, marker_scale=1.0):
+                   arm_a=_WG.arm_a1, arm_b=_WG.arm_b1,
+                   calf=_WG.calf, side=1, bar_len_a=None, marker_scale=1.0):
     """
     Draw one wheel assembly: calf strut from chain joint to V-apex,
     then two arms from V-apex to each wheel.

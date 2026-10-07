@@ -1,255 +1,110 @@
 """
-Wheel angular-velocity + joint-angle graph for any of the 4 transition scenarios.
-
-Keyframes and solver config are imported from animate_transition.SCENARIO_CONFIG
-so this file always uses the same data as the animation renderer.
+wheel_omega.py — wheel speed, joint angle and joint speed plots for one transition.
 
 Usage:
     python wheel_omega.py [floor_to_wall|wall_to_ceiling|outside|thin_edge]
+    (default floor_to_wall)
 
-Default: floor_to_wall
+Solves the transition exactly as animate_transition.py does and plots, against
+time, with the phase boundaries marked:
+  1. wheel spin of all four wheels (rad/s, CCW positive; scenarios.wheel_spin)
+     with the rolling-speed limit SLIDE_SPEED / wheel radius
+  2. joint angles q1–q4 (display convention) with the ±95° warning level
+  3. joint speeds (°/s) with the joint speed limit
 
-Sign convention (universal physical — counterclockwise = positive):
-    floor        contact below wheel:  omega = -dx/R   (left = +CCW)
-    wall (int.)  contact right side:   omega = +dy/R   (up   = +CCW)
-    ceiling      contact above wheel:  omega = +dx/R   (right = +CCW)
-    ceiling-top  contact below wheel:  omega = -dx/R   (left = +CCW)
-    ext. wall    contact right side:   omega = -dy/R   (down = +CCW)
-    edge-top     contact below wheel:  omega = -dx/R   (right = -CW)
-    edge-bottom  contact above wheel:  omega = +dx/R   (left  = -CW)
-    pivot / air: omega = 0
+Writes wheel_omega/wheel_omega_<short name>.png.
 """
 
-import sys
 import os
+import sys
+
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from constraints import wheel_centers
-from animate_transition import (
-    solve_trajectory, SCENARIO_CONFIG,
-    l1, l2, l3,
-    WALL_X, CEILING_Y, EDGE_X, EDGE_Y,
-    N_FRAMES,
-    _WTC_T_APPROACH, _WTC_T_ROT_END, _WTC_T_GLIDE_END, _WTC_T_SLIDE_A, _WTC_T_SLIDE_END,
-    _WTC_FRONT_ROT_DT, _WTC_ROT_DT, _WTC_POST_HOLD_DT,
-    _OUT_T_BACK_ARR, _OUT_T_FRONT_STOP, _OUT_T_ROT1_S, _OUT_T_ROT1_E,
-    _OUT_T_BOTH_S, _OUT_T_ROT2_E,
-)
+from animate_transition import solve_trajectory
+from kinematics import q_display
+from scenarios import SCENARIOS, wheel_spin
+from timing import MAX_JOINT_SPEED, SLIDE_SPEED
 
-TOL = 0.004
+OUT_NAMES = {"floor_to_wall": "wheel_omega_ftw.png", "wall_to_ceiling": "wheel_omega_wtc.png",
+             "outside": "wheel_omega_out.png", "thin_edge": "wheel_omega_te.png"}
 
-SCENARIO = sys.argv[1] if len(sys.argv) > 1 else "floor_to_wall"
 
-if SCENARIO not in SCENARIO_CONFIG:
-    print(f"Unknown scenario '{SCENARIO}'. "
-          "Choose: floor_to_wall, wall_to_ceiling, outside, thin_edge")
-    sys.exit(1)
+def plot(name, out_dir):
+    scn = SCENARIOS[name]
+    traj = solve_trajectory(scn)
+    t = traj.times
+    spin = wheel_spin(scn, traj.poses, t)
+    qs = np.degrees(np.unwrap(np.array([q_display(q) for q in traj.Q]), axis=0))
+    dqs = np.diff(qs, axis=0) / np.diff(t)[:, None]          # °/s over each step
+    t_mid = 0.5 * (t[1:] + t[:-1])
 
-cfg           = SCENARIO_CONFIG[SCENARIO]
-R             = cfg["wg"].wheel_r
-KEYFRAMES     = cfg["keyframes"]
-N_GRID        = cfg["n_grid"]
-SMOOTH_WEIGHT = cfg["smooth_weight"]
-COLD_AT       = cfg["cold_at"]
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 12), sharex=True)
+    fig.suptitle(f"{scn.label} — {t[-1]:.1f} s, {len(traj)} frames at {traj.rate:g} Hz",
+                 fontsize=13, y=0.98)
 
-# ── Per-scenario contact detection ────────────────────────────────────────────
+    # 1 wheel spin
+    styles = [("Front arm A", "#1f77b4", "-"), ("Front arm B", "#1f77b4", "--"),
+              ("Back arm A", "#d62728", "-"), ("Back arm B", "#d62728", "--")]
+    for j, (label, color, ls) in enumerate(styles):
+        ax1.plot(t, spin[:, j], label=label, color=color, lw=1.8, linestyle=ls)
+    omega_lim = SLIDE_SPEED / scn.wg.wheel_r
+    for sgn in (1, -1):
+        ax1.axhline(sgn * omega_lim, color="orange", lw=0.8, linestyle="--", alpha=0.6,
+                    label=f"rolling limit ±{omega_lim:.1f}" if sgn > 0 else None)
+    ax1.axhline(0, color="black", lw=0.6, linestyle=":")
+    ax1.set_ylabel("Wheel spin (rad/s)")
+    ax1.legend(loc="upper right", fontsize=9, ncol=3)
 
-def t2f(t): return round(t * (N_FRAMES - 1)) + 1
+    # 2 joint angles
+    colors = ["#2ca02c", "#ff7f0e", "#9467bd", "#8c564b"]
+    for j in range(4):
+        ax2.plot(t, qs[:, j], label=f"q{j + 1}", color=colors[j], lw=1.8)
+    for sgn in (1, -1):
+        ax2.axhline(sgn * 95, color="red", lw=0.8, linestyle="--", alpha=0.5,
+                    label="±95° warning" if sgn > 0 else None)
+    ax2.axhline(0, color="black", lw=0.5, linestyle=":")
+    ax2.set_ylabel("Joint angle (°)")
+    ax2.legend(loc="upper right", fontsize=9, ncol=5)
 
-if SCENARIO == "floor_to_wall":
-    OUT_FILE = "wheel_omega_ftw.png"
-    TITLE    = "floor_to_wall — all 90 frames"
+    # 3 joint speeds
+    for j in range(4):
+        ax3.plot(t_mid, dqs[:, j], label=f"q{j + 1}", color=colors[j], lw=1.8)
+    lim = np.degrees(MAX_JOINT_SPEED)
+    for sgn in (1, -1):
+        ax3.axhline(sgn * lim, color="red", lw=0.8, linestyle="--", alpha=0.5,
+                    label=f"±{lim:.1f}°/s limit" if sgn > 0 else None)
+    ax3.axhline(0, color="black", lw=0.5, linestyle=":")
+    ax3.set_ylabel("Joint speed (°/s)")
+    ax3.set_xlabel("Time (s)")
+    ax3.legend(loc="upper right", fontsize=9, ncol=5)
 
-    def on_A(w):   return w[1] <= R + TOL                # floor
-    def on_B(w):   return w[0] <= WALL_X + R + TOL       # interior wall
-    def formula_A(w, wp): return -(w[0] - wp[0]) / R     # floor: left = +CCW
-    def formula_B(w, wp): return  (w[1] - wp[1]) / R     # wall:  up   = +CCW
+    for ax in (ax1, ax2, ax3):
+        ax.grid(axis="y", alpha=0.3)
+        ax.set_xlim(0, t[-1])
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
 
-    PHASES = [
-        (t2f(0.150), "front stops"),
-        (t2f(0.183), "front rotates"),
-        (t2f(0.360), "front on wall"),
-        (t2f(0.480), "both moving"),
-        (t2f(0.775), "back at corner"),
-        (t2f(0.808), "back rotates"),
-        (t2f(0.977), "back on wall"),
-    ]
+    # phase boundaries, labelled at the top of the first panel
+    for phase, start in zip(traj.phases, traj.phase_starts):
+        for ax in (ax1, ax2, ax3):
+            ax.axvline(start, color="gray", lw=0.8, linestyle=":")
+        ax1.text(start + 0.15, ax1.get_ylim()[1] * 0.97, phase.name,
+                 fontsize=8, color="gray", va="top", rotation=90)
 
-elif SCENARIO == "wall_to_ceiling":
-    _WTC_CY = SCENARIO_CONFIG["wall_to_ceiling"]["keyframes"][0]["ceiling_y"]
-    OUT_FILE = "wheel_omega_wtc.png"
-    TITLE    = "wall_to_ceiling — all 90 frames"
+    os.makedirs(out_dir, exist_ok=True)
+    out = os.path.join(out_dir, OUT_NAMES[name])
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"Saved: {out}")
+    return out
 
-    def on_A(w):   return w[0] <= WALL_X + R + TOL       # interior wall
-    def on_B(w):   return w[1] >= _WTC_CY - R - TOL      # interior ceiling
-    def formula_A(w, wp): return  (w[1] - wp[1]) / R     # wall:    up    = +CCW
-    def formula_B(w, wp): return  (w[0] - wp[0]) / R     # ceiling: right = +CCW
 
-    PHASES = [
-        (t2f(_WTC_T_APPROACH),                                          "front at corner"),
-        (t2f(_WTC_T_APPROACH + _WTC_FRONT_ROT_DT / 2),                 "front rotates"),
-        (t2f(_WTC_T_ROT_END),                                           "front on ceiling"),
-        (t2f(_WTC_T_GLIDE_END),                                         "both advance"),
-        (t2f(_WTC_T_SLIDE_A),                                           "front stops"),
-        (t2f(_WTC_T_SLIDE_END),                                         "back at corner"),
-        (t2f(_WTC_T_SLIDE_END + 6*_WTC_ROT_DT),                        "back on ceiling"),
-        (t2f(_WTC_T_SLIDE_END + 6*_WTC_ROT_DT + _WTC_POST_HOLD_DT),   "depart"),
-    ]
-
-elif SCENARIO == "outside":
-    OUT_FILE = "wheel_omega_out.png"
-    TITLE    = "outside corner — all 90 frames"
-
-    # Ceiling surface ends at x=WALL_X — wheel must still be over it.
-    def on_A(w):   return w[1] >= CEILING_Y + R - TOL and w[0] >= WALL_X - TOL
-    # Exterior wall contact: wheel centre at x ≈ WALL_X − R.
-    def on_B(w):   return abs(w[0] - (WALL_X - R)) <= TOL
-    def formula_A(w, wp): return -(w[0] - wp[0]) / R     # ceil-top: left  = +CCW
-    def formula_B(w, wp): return -(w[1] - wp[1]) / R     # ext-wall: down  = +CCW
-
-    PHASES = [
-        (t2f(_OUT_T_FRONT_STOP),          "front arrives"),
-        (t2f(_OUT_T_ROT1_S),              "front rotates"),
-        (t2f(_OUT_T_ROT1_E),              "front on wall"),
-        (t2f(_OUT_T_BOTH_S),              "back starts"),
-        (t2f(_OUT_T_BACK_ARR),            "back arrives"),
-        (t2f(_OUT_T_BACK_ARR + 0.025),    "back rotates"),
-        (t2f(_OUT_T_ROT2_E),              "back on wall"),
-    ]
-
-elif SCENARIO == "thin_edge":
-    OUT_FILE = "wheel_omega_te.png"
-    TITLE    = "thin_edge — all 90 frames"
-
-    _X_TOL = R + TOL
-    def on_A(w):   return abs(w[1] - (EDGE_Y + R)) <= TOL and w[0] <= EDGE_X + _X_TOL
-    def on_B(w):   return abs(w[1] - (EDGE_Y - R)) <= TOL and w[0] <= EDGE_X + _X_TOL
-    def formula_A(w, wp): return -(w[0] - wp[0]) / R     # top:    right = -CW
-    def formula_B(w, wp): return  (w[0] - wp[0]) / R     # bottom: left  = -CW
-
-    PHASES = [
-        (t2f(0.200), "red stops"),
-        (t2f(0.232), "red pivots"),
-        (t2f(0.521), "red done"),
-        (t2f(0.616), "green stops"),
-        (t2f(0.641), "green pivots"),
-        (t2f(0.941), "green done"),
-    ]
-
-# ── Solve trajectory ─────────────────────────────────────────────────────────
-print(f"{SCENARIO}  ({N_FRAMES} frames)")
-print("-" * 50)
-results = solve_trajectory(
-    KEYFRAMES, cfg["wg"], l1, l2, l3,
-    n_frames=N_FRAMES, n_grid=N_GRID,
-    smooth_weight=SMOOTH_WEIGHT, cold_at=COLD_AT,
-)
-print("-" * 50)
-
-# ── Extract positions and joint angles ───────────────────────────────────────
-x1  = np.array([r[1]["x1"]     for r in results])
-y1  = np.array([r[1]["y1"]     for r in results])
-x2  = np.array([r[1]["x2"]     for r in results])
-y2  = np.array([r[1]["y2"]     for r in results])
-th1 = np.array([r[2]["theta1"] for r in results])
-th2 = np.array([r[2]["theta2"] for r in results])
-from kinematics import q_display as _q_display
-_qs_raw = np.array([r[0] for r in results])                          # (N_FRAMES, 4)
-_qs_disp_rad = np.stack([_q_display(q) for q in _qs_raw])            # (N_FRAMES, 4) radians
-qs = np.degrees(np.unwrap(_qs_disp_rad, axis=0))                     # unwrap to remove ±180° wrap artefacts
-
-# ── Wheel centers ─────────────────────────────────────────────────────────────
-_wg = cfg["wg"]
-wl1 = np.array([wheel_centers(x1[i], y1[i], th1[i], _wg, side= 1)[0] for i in range(N_FRAMES)])
-wr1 = np.array([wheel_centers(x1[i], y1[i], th1[i], _wg, side= 1)[1] for i in range(N_FRAMES)])
-wl2 = np.array([wheel_centers(x2[i], y2[i], th2[i], _wg, side=-1)[0] for i in range(N_FRAMES)])
-wr2 = np.array([wheel_centers(x2[i], y2[i], th2[i], _wg, side=-1)[1] for i in range(N_FRAMES)])
-
-# ── Angular velocity ──────────────────────────────────────────────────────────
-def compute_omega(wheels):
-    """on_A / on_B and formula_A / formula_B defined per scenario above."""
-    omega = np.zeros(N_FRAMES)
-    for f in range(1, N_FRAMES):
-        w, wp = wheels[f], wheels[f - 1]
-        a = on_A(w)
-        b = on_B(w)
-        # Require previous frame also in contact: first-touch frames have no
-        # prior rolling displacement, so ω=0.
-        if a and not b and on_A(wp):
-            omega[f] = formula_A(w, wp)
-        elif b and not a and on_B(wp):
-            omega[f] = formula_B(w, wp)
-        # both (corner/pivot), neither, or first-touch → omega stays 0
-    omega[0] = omega[1]
-    return omega
-
-omega_fl = compute_omega(wl1)   # front-left  (assembly 1)
-omega_fr = compute_omega(wr1)   # front-right (assembly 1)
-omega_bl = compute_omega(wl2)   # back-left   (assembly 2)
-omega_br = compute_omega(wr2)   # back-right  (assembly 2)
-
-# ── Plot ──────────────────────────────────────────────────────────────────────
-frames = np.arange(1, N_FRAMES + 1)
-fig, (ax, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 12), sharex=True,
-                                    gridspec_kw={"height_ratios": [1, 1, 1]})
-fig.suptitle(TITLE, fontsize=13, y=0.98)
-
-ax.plot(frames, omega_fl, label="Front-left",  color="#1f77b4", lw=1.8)
-ax.plot(frames, omega_fr, label="Front-right", color="#1f77b4", lw=1.8,
-        linestyle="--", dashes=(6, 3))
-ax.plot(frames, omega_bl, label="Back-left",   color="#d62728", lw=1.8)
-ax.plot(frames, omega_br, label="Back-right",  color="#d62728", lw=1.8,
-        linestyle="--", dashes=(6, 3))
-ax.axhline(0, color="black", lw=0.6, linestyle=":")
-_OMEGA_LIMIT = 0.70    # operational sliding limit (= _OMEGA_SLIDE in animate_transition)
-ax.axhline( _OMEGA_LIMIT, color="orange", lw=0.8, linestyle="--", alpha=0.6,
-            label=f"ω limit ±{_OMEGA_LIMIT:.2f}")
-ax.axhline(-_OMEGA_LIMIT, color="orange", lw=0.8, linestyle="--", alpha=0.6)
-ax.set_ylabel("Angular velocity  (rad / frame)", fontsize=10)
-ax.set_xlim(1, N_FRAMES)
-ax.xaxis.set_major_locator(ticker.MultipleLocator(10))
-ax.xaxis.set_minor_locator(ticker.MultipleLocator(5))
-ax.legend(loc="upper right", fontsize=9, ncol=2)
-ax.grid(axis="y", alpha=0.3)
-
-q_colors = ["#2ca02c", "#ff7f0e", "#9467bd", "#8c564b"]
-for i, (name, col) in enumerate(zip(["q1", "q2", "q3", "q4"], q_colors)):
-    ax2.plot(frames, qs[:, i], label=name, color=col, lw=1.8)
-ax2.axhline(  0, color="black", lw=0.5, linestyle=":")
-ax2.axhline(  95, color="red",  lw=0.8, linestyle="--", alpha=0.5, label="+95° limit")
-ax2.axhline( -95, color="red",  lw=0.8, linestyle="--", alpha=0.5)
-ax2.set_ylabel("Joint angle  (°)", fontsize=10)
-ax2.legend(loc="upper right", fontsize=9, ncol=3)
-ax2.grid(axis="y", alpha=0.3)
-
-_DJOINT_LIM = 7.2    # °/frame joint limit
-dqs = np.diff(qs, axis=0, prepend=qs[[0]])   # dqs[0]=0; dqs[i]=qs[i]−qs[i−1]
-for i, (name, col) in enumerate(zip(["q1", "q2", "q3", "q4"], q_colors)):
-    ax3.plot(frames, dqs[:, i], label=name, color=col, lw=1.8)
-ax3.axhline(0, color="black", lw=0.5, linestyle=":")
-ax3.axhline( _DJOINT_LIM, color="red", lw=0.8, linestyle="--", alpha=0.5,
-             label=f"±{_DJOINT_LIM:.2f}°/fr limit")
-ax3.axhline(-_DJOINT_LIM, color="red", lw=0.8, linestyle="--", alpha=0.5)
-ax3.set_ylabel("Δ Joint angle  (°/frame)", fontsize=10)
-ax3.set_xlabel("Frame", fontsize=10)
-ax3.legend(loc="upper left", fontsize=9, ncol=3)
-ax3.grid(axis="y", alpha=0.3)
-
-fig.tight_layout(rect=[0, 0, 1, 0.97])
-
-for f, label in PHASES:
-    if 1 <= f <= N_FRAMES:
-        for a in (ax, ax2, ax3):
-            a.axvline(f, color="gray", lw=0.8, linestyle=":")
-        yhi = ax.get_ylim()[1]
-        ax.text(f + 0.4, yhi * 0.97, label,
-                fontsize=7, color="gray", va="top", rotation=90)
-
-out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wheel_omega", OUT_FILE)
-fig.savefig(out, dpi=150)
-print(f"Saved: {out}")
+if __name__ == "__main__":
+    name = sys.argv[1] if len(sys.argv) > 1 else "floor_to_wall"
+    if name not in SCENARIOS:
+        print(f"Unknown scenario '{name}'. Choose: {list(SCENARIOS)}")
+        sys.exit(1)
+    plot(name, os.path.join(os.path.dirname(os.path.abspath(__file__)), "wheel_omega"))
