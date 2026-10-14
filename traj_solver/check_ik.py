@@ -3,8 +3,8 @@ check_ik.py — joint-angle quality report for the transition scenarios.
 
 Solves each scenario exactly as animate_transition.py does and reports the
 metrics that matter when the joint angles are played back on the motors:
-speed against the joint limit, smoothness, joint-limit margins and
-constraint feasibility.
+speed against the joint limit, smoothness, joint-limit and clearance
+margins, and whether every hard rule (constraints.py) holds.
 
 Usage:
     python check_ik.py [scenario ...]                  default: all scenarios
@@ -28,6 +28,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from animate_transition import solve_trajectory
+from constraints import (CLEARANCE_GROUPS, HARD_CLEARANCE, JOINT_HARD_LIMIT_DEG,
+                         JOINT_SOFT_LIMIT_DEG, SOFT_CLEARANCE)
 from kinematics import q_display
 from scenarios import SCENARIOS
 from timing import MAX_JOINT_SPEED
@@ -35,8 +37,8 @@ from timing import MAX_JOINT_SPEED
 _DIR          = os.path.dirname(os.path.abspath(__file__))
 BASELINE_PATH = os.path.join(_DIR, "ik_baseline.npz")
 
-SOFT_DEG = 95.0    # display-convention warning level (same as animate_transition's check)
-HARD_DEG = 105.0   # display-convention hard joint limit
+SOFT_DEG = JOINT_SOFT_LIMIT_DEG   # display-convention joint limits (constraints.py)
+HARD_DEG = JOINT_HARD_LIMIT_DEG
 MOVE_DEG = 0.05    # steps smaller than this count as stationary when counting reversals
 
 
@@ -63,7 +65,7 @@ def metrics(traj):
         reversals = max(reversals, int(np.sum(s[1:] != s[:-1])))
 
     infos = traj.infos
-    penalty = np.array([info["penalty"] for info in infos])
+    margin = np.array([info["margin_score"] for info in infos])
     return {
         "Q":         Q,
         "residual":  max(info["residual_norm"] for info in infos),
@@ -77,8 +79,9 @@ def metrics(traj):
         "soft":      int(np.sum(np.any(np.abs(Dw) > SOFT_DEG, axis=1))),
         "hard":      int(np.sum(np.any(np.abs(Dw) > HARD_DEG, axis=1))),
         "sign":      int(np.sum(np.any(Q[:, 1:3] > 0.0, axis=1))),
-        "pen_total": float(penalty.sum()),
-        "pen_max":   float(penalty.max()),
+        "margin":    float(margin.sum() / traj.rate),     # soft score integrated over time (s)
+        "margin_max": float(margin.max()),
+        "clearance": {g: min(info["clearance"][g] for info in infos) for g in CLEARANCE_GROUPS},
         # Hard constraints broken by the chosen configuration, and frames where
         # no configuration satisfies them (the pose itself is infeasible).
         "violated":  {k: info["violations"] for k, info in enumerate(infos) if not info["feasible"]},
@@ -126,11 +129,13 @@ def report(scenario, traj, m, seconds, baseline):
     print(f"  total joint travel  {m['travel']:.1f}°")
     print(f"  max |q| (display)   {m['max_q']:.1f}°   frames > {SOFT_DEG:.0f}°: {m['soft']}   "
           f"> {HARD_DEG:.0f}°: {m['hard']}   q2/q3 > 0: {m['sign']}")
-    print(f"  constraint penalty  total {m['pen_total']:.3g}, max {m['pen_max']:.3g} per frame "
-          f"(hard + soft terms)")
+    print(f"  margin score        {m['margin']:.3g} over the run, max {m['margin_max']:.3g} per frame "
+          f"(clearance and joint margins; 1 = one at its hard limit)")
+    print(f"  smallest clearance  " + ", ".join(f"{g} {v * 1000:.0f} mm" for g, v in m["clearance"].items())
+          + f"   (hard {HARD_CLEARANCE * 1000:.0f}, soft {SOFT_CLEARANCE * 1000:.0f} mm)")
     print(f"  hard violations     {len(m['violated'])}/{n} frames{_term_summary(m['violated'])}")
-    print(f"  pose infeasible     {len(m['blocked'])}/{n} frames (no configuration satisfies "
-          f"every hard constraint){_term_summary(m['blocked'])}")
+    print(f"  pose infeasible     {len(m['blocked'])}/{n} frames (no configuration meets "
+          f"every hard rule){_term_summary(m['blocked'])}")
     if scenario in baseline:
         shared = _shared_samples(m["Q"], baseline[scenario])
         if shared is None:

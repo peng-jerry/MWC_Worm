@@ -49,7 +49,8 @@ def plot(name, out_dir=OUT_DIR):
 
     print(f"\n{name}:")
     for ax, k, label in zip(axes, frames, labels):
-        draw_frame(ax, traj, k, xlim, ylim, title="", marker_scale=cell_w / 10.0, show_labels=False)
+        draw_frame(ax, scn, traj.Q[k], traj.poses[k], xlim, ylim, title="",
+                   marker_scale=cell_w / 10.0, show_labels=False)
         if ax.get_legend() is not None:
             ax.get_legend().remove()
         ax.tick_params(labelsize=5)

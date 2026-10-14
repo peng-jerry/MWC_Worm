@@ -9,7 +9,8 @@ Solves the transition exactly as animate_transition.py does and plots, against
 time, with the phase boundaries marked:
   1. wheel spin of all four wheels (rad/s, CCW positive; scenarios.wheel_spin)
      with the rolling-speed limit SLIDE_SPEED / wheel radius
-  2. joint angles q1–q4 (display convention) with the ±95° warning level
+  2. joint angles q1–q4 (display convention) with the soft and hard joint
+     limits from constraints.py
   3. joint speeds (°/s) with the joint speed limit
 
 Writes wheel_omega/wheel_omega_<short name>.png.
@@ -25,6 +26,7 @@ import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from animate_transition import solve_trajectory
+from constraints import JOINT_HARD_LIMIT_DEG, JOINT_SOFT_LIMIT_DEG
 from kinematics import q_display
 from scenarios import SCENARIOS, wheel_spin
 from timing import MAX_JOINT_SPEED, SLIDE_SPEED
@@ -64,8 +66,10 @@ def plot(name, out_dir):
     for j in range(4):
         ax2.plot(t, qs[:, j], label=f"q{j + 1}", color=colors[j], lw=1.8)
     for sgn in (1, -1):
-        ax2.axhline(sgn * 95, color="red", lw=0.8, linestyle="--", alpha=0.5,
-                    label="±95° warning" if sgn > 0 else None)
+        ax2.axhline(sgn * JOINT_SOFT_LIMIT_DEG, color="red", lw=0.8, linestyle="--", alpha=0.5,
+                    label=f"±{JOINT_SOFT_LIMIT_DEG:g}° soft limit" if sgn > 0 else None)
+        ax2.axhline(sgn * JOINT_HARD_LIMIT_DEG, color="red", lw=1.0, alpha=0.7,
+                    label=f"±{JOINT_HARD_LIMIT_DEG:g}° hard limit" if sgn > 0 else None)
     ax2.axhline(0, color="black", lw=0.5, linestyle=":")
     ax2.set_ylabel("Joint angle (°)")
     ax2.legend(loc="upper right", fontsize=9, ncol=5)

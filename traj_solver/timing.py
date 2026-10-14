@@ -25,10 +25,6 @@ SAMPLE_RATE = float(os.environ.get("TRAJ_SAMPLE_RATE", 6.0))
 # phase boundary falls exactly on a frame at 3 or 6 fps.
 SCHEDULE_STEP = 1 / 3
 
-# The trajectory solver's smoothness weight is defined per frame at this rate
-# and rescaled to the actual rate (see animate_transition.solve_trajectory).
-REFERENCE_RATE = 3.0
-
 # ── Speeds and limits ─────────────────────────────────────────────────────────
 MAX_JOINT_SPEED  = np.radians(21.6)   # rad/s, the joint speed limit (motor setting)
 PLAN_JOINT_SPEED = np.radians(21.0)   # rad/s, what the solver plans to: ~3% margin

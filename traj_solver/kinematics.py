@@ -71,19 +71,7 @@ def q_display(q):
       q1_display = q1 - π/2  (0° when link is straight up from front calf)
       q4_display = q4 - π/2  (0° when last link directly above back calf, P2 above P3)
       q2, q3 unchanged.
-    Result is wrapped to [-π, π].
+    Result is wrapped to [-π, π).  q is one joint vector (4,) or many (K, 4).
     """
-    qd = np.asarray(q, dtype=float).copy()
-    qd[0] = (qd[0] - np.pi / 2 + np.pi) % (2 * np.pi) - np.pi
-    qd[3] = (qd[3] - np.pi / 2 + np.pi) % (2 * np.pi) - np.pi
-    return qd
-
-
-def reachability_check(x1, y1, x2, y2, l1, l2, l3):
-    """
-    Return True if (x2,y2) is within the total reach of the chain from (x1,y1).
-    This is a necessary but not sufficient condition for a solution to exist.
-    """
-    dist = np.hypot(x2 - x1, y2 - y1)
-    total_len = l1 + l2 + l3
-    return dist <= total_len
+    shift = np.array([-np.pi / 2, 0.0, 0.0, -np.pi / 2])
+    return (np.asarray(q, dtype=float) + shift + np.pi) % (2 * np.pi) - np.pi

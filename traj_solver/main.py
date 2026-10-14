@@ -56,7 +56,7 @@ def main():
 
     xlim, ylim = plot_limits(traj)
     fig, ax = plt.subplots(figsize=(9, 7))
-    draw_frame(ax, traj, k, xlim, ylim, title=label)
+    draw_frame(ax, scn, q, p, xlim, ylim, title=label)
     ax.grid(True, alpha=0.3, linestyle="--")
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
