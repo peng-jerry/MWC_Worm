@@ -27,7 +27,7 @@ import time
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from animate_transition import solve_trajectory
+from trajectory import solve_trajectory
 from constraints import (CLEARANCE_GROUPS, HARD_CLEARANCE, JOINT_HARD_LIMIT_DEG,
                          JOINT_SOFT_LIMIT_DEG, SOFT_CLEARANCE)
 from kinematics import q_display
@@ -118,7 +118,7 @@ def report(scenario, traj, m, seconds, baseline):
     n = len(traj)
     phases = ", ".join(f"{p.name} {p.duration:.1f}" for p in traj.phases)
     print(f"\n=== {scenario}   ({traj.times[-1]:.1f} s, {n} frames at {traj.rate:g} Hz, "
-          f"solved in {seconds:.1f} s)")
+          + (f"loaded from cache in {seconds:.1f} s)" if traj.cached else f"solved in {seconds:.1f} s)"))
     print(f"  phases (s)          {phases}"
           + (f"   [{traj.retimes} slow-down(s)]" if traj.retimes else ""))
     print(f"  max residual        {m['residual']:.1e}")

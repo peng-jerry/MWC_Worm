@@ -5,11 +5,9 @@ Pipeline
 --------
   scenarios.py       geometry and the five phases of each transition
                      (approach, pivot, both move, pivot, depart)
-  solve_trajectory   samples the phases at timing.SAMPLE_RATE, fixes both ends
-                     to the cruise posture, and lets trajectory_ik choose every
-                     frame's joint angles together.  If a joint would have to
-                     move faster than the limit, that phase is slowed down and
-                     the trajectory is solved again.
+  trajectory.py      solve_trajectory: samples the phases at
+                     timing.SAMPLE_RATE and lets trajectory_ik choose every
+                     frame's joint angles together (cached between runs)
   render_video       GIF/MP4 of the solved transition, with every part drawn
                      at its real size (constraints.py outline)
   __main__           solve, run the built-in check (hard rules, joint
@@ -25,8 +23,6 @@ Usage:
 
 import os
 import sys
-from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 import matplotlib
@@ -40,119 +36,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from constraints import (JOINT_HARD_LIMIT_DEG, JOINT_SOFT_LIMIT_DEG, JOINT_RADIUS,
                          assembly_parts, wheel_centers)
 from kinematics import forward_kinematics, q_display
-from scenarios import (SCENARIOS, Scenario, CHAIN_LENGTH, l1, l2, l3, plan_phases, phase_starts,
-                       sample_poses, cruise_posture, follow_gap, wheel_spin)
-from timing import SAMPLE_RATE, PLAN_JOINT_SPEED, MAX_JOINT_SPEED, SLIDE_SPEED
-from trajectory_ik import solve_trajectory_dp
+from scenarios import SCENARIOS, WHEELS, CHAIN_LENGTH, l1, l2, l3, wheel_speeds
+from timing import PLAN_JOINT_SPEED, MAX_JOINT_SPEED, SLIDE_SPEED
+from trajectory import solve_trajectory
 from visualize import plot_robot
-
-
-# A phase is slowed down when a joint exceeds PLAN_JOINT_SPEED by more than
-# RETIME_TOLERANCE in it; the trajectory is then solved again, at most
-# MAX_RETIMES times.
-RETIME_TOLERANCE = 0.005
-MAX_RETIMES = 5
 
 
 def _wrap(a):
     """Wrap angles to [-π, π)."""
     return (a + np.pi) % (2 * np.pi) - np.pi
-
-
-# ------------------------------------------------------------------ #
-#  Solving                                                            #
-# ------------------------------------------------------------------ #
-
-@dataclass
-class Trajectory:
-    """
-    A solved transition, one entry per frame.
-
-    times    (N,) seconds
-    poses    assembly poses per frame (dicts, see scenarios.sample_poses)
-    Q        (N, 4) joint angles (rad)
-    infos    per-frame diagnostics (trajectory_ik.solve_trajectory_dp)
-    phases   the five phases with their final durations
-    retimes  how many times phases were slowed down for the joint speed limit
-    gap      gap (m) the partner keeps while following a pivot, or None when
-             it parks (scenarios.follow_gap)
-
-    Iterating yields (q, info, pose) for each frame.
-    """
-    scenario: Scenario
-    phases: list
-    times: np.ndarray
-    poses: list
-    Q: np.ndarray
-    infos: list
-    retimes: int
-    gap: Optional[float]
-
-    @property
-    def rate(self):
-        """Frames per second."""
-        return (len(self.times) - 1) / self.times[-1]
-
-    @property
-    def phase_starts(self):
-        """Start time of each phase plus the end time."""
-        return phase_starts(self.phases)
-
-    def phase_at(self, t):
-        """Index of the phase running at time t."""
-        return min(int(np.searchsorted(self.phase_starts, t, side="right")) - 1,
-                   len(self.phases) - 1)
-
-    def __len__(self):
-        return len(self.times)
-
-    def __iter__(self):
-        return iter(zip(self.Q, self.infos, self.poses))
-
-
-def _phase_peak_speeds(times, Q, phases):
-    """Fastest joint speed (rad/s) within each phase.  Each step between two
-    frames counts toward the phase that contains its midpoint."""
-    D = np.unwrap(np.array([q_display(q) for q in Q]), axis=0)
-    speed = np.abs(np.diff(D, axis=0)).max(axis=1) / np.diff(times)
-    mid = 0.5 * (times[1:] + times[:-1])
-    starts = phase_starts(phases)
-    return np.array([speed[(mid > starts[i]) & (mid < starts[i + 1])].max(initial=0.0)
-                     for i in range(len(phases))])
-
-
-def solve_trajectory(scn, rate=SAMPLE_RATE):
-    """
-    Plan the transition `scn`, sample it at `rate` frames per second and solve
-    every frame's joint angles together, with both ends fixed to the cruise
-    posture.  Returns a Trajectory.
-
-    At an outside corner or edge the follow gap is chosen first
-    (scenarios.follow_gap).  The phases are then timed from the wheel and
-    pivot speeds alone (scenarios.plan_phases).  If the solved joints must
-    move faster than timing.PLAN_JOINT_SPEED in some phase, that phase is
-    lengthened in proportion and the trajectory is solved again.
-    """
-    gap = follow_gap(scn, rate) if scn.partner_follows else None
-    min_durations = None
-    for retimes in range(MAX_RETIMES + 1):
-        phases = plan_phases(scn, min_durations, gap)
-        times, poses = sample_poses(scn, phases, rate)
-        frame_rate = (len(times) - 1) / times[-1]
-        Q, infos = solve_trajectory_dp(
-            poses, scn.env, scn.wg, l1, l2, l3,
-            dt=1.0 / frame_rate,
-            max_step=PLAN_JOINT_SPEED / frame_rate,
-            q_start=cruise_posture(scn, poses[0]),
-            q_end=cruise_posture(scn, poses[-1]),
-        )
-        peaks = _phase_peak_speeds(times, Q, phases)
-        too_fast = peaks > PLAN_JOINT_SPEED * (1 + RETIME_TOLERANCE)
-        if not too_fast.any() or retimes == MAX_RETIMES:
-            break
-        min_durations = [p.duration * (pk / PLAN_JOINT_SPEED if fast else 1.0)
-                         for p, pk, fast in zip(phases, peaks, too_fast)]
-    return Trajectory(scn, phases, times, poses, Q, infos, retimes, gap)
 
 
 # ------------------------------------------------------------------ #
@@ -339,9 +231,9 @@ def check(traj):
             if abs(d[j]) >= jump:
                 issues.append(f"  JUMP    t={traj.times[k]:5.2f}s  {names[j]}  Δ={np.degrees(abs(d[j])):.2f}°"
                               f" ({np.degrees(abs(d[j])) * traj.rate:.1f}°/s)")
-    spin = wheel_spin(traj.scenario, traj.poses, traj.times)
+    spin, _ = wheel_speeds(traj.scenario, traj.phases, traj.times)
     for k, j in zip(*np.nonzero(np.abs(spin) > omega_max)):
-        issues.append(f"  OMEGA   t={traj.times[k]:5.2f}s  wheel {j}  ω={spin[k, j]:+.2f} rad/s")
+        issues.append(f"  OMEGA   t={traj.times[k]:5.2f}s  {WHEELS[j]}  ω={spin[k, j]:+.2f} rad/s")
     return issues
 
 

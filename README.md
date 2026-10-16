@@ -155,29 +155,25 @@ Output files (all written relative to `traj_solver/`):
 | `wheel_omega/wheel_omega_te.png` | ω + joint-angle graph — thin_edge |
 | `robot_configs/robot_config_{scenario}.png` | Single-frame snapshot — main.py |
 | `keyframes/keyframes_{scenario}.png` | Grid of all keyframe poses |
-| `timings/{scenario}.csv` | Per-frame joint angles and wheel speeds for robot control |
+| `timings/{scenario}.csv` | Waypoints for the robot: joint positions and speeds, wheel speeds (`Motor/playback.py`) |
 
-### Timing CSV columns
+### Timing files
 
-Each CSV has 90 rows (one per frame) and 13 columns. `PHYSICAL_FPS = 3` fr/s, derived from the motor speed limit: 21.6 °/s ÷ 7.2 °/fr = 3 fr/s. To adapt to a different motor, set `PHYSICAL_FPS = motor_max_deg_per_s / 7.2` in `robot_timing.py`; only the time scaling and velocity values change — the joint angle columns are unaffected.
+`robot_timing.py` writes one row per waypoint at `timing.SAMPLE_RATE` (6 per second by default; override with `TRAJ_SAMPLE_RATE=3`). The file starts with `#` lines giving units, conventions, the calibration used and how to interpolate; readers skip them.
 
 | Column | Description |
 |--------|-------------|
-| `time_s` | Elapsed time in seconds (`frame / PHYSICAL_FPS`) |
-| `q1_rad` | Joint 1 angle (rad), calf-up convention — 0 = link straight up from calf |
-| `dq1_rad_s` | Joint 1 angular velocity (rad/s) = Δq × PHYSICAL\_FPS |
-| `w_fl_rad_s` | Front-left wheel ω (rad/s), CCW positive |
-| `q2_rad` | Joint 2 angle (rad) |
-| `dq2_rad_s` | Joint 2 angular velocity (rad/s) |
-| `w_fr_rad_s` | Front-right wheel ω (rad/s) |
-| `q3_rad` | Joint 3 angle (rad) |
-| `dq3_rad_s` | Joint 3 angular velocity (rad/s) |
-| `w_bl_rad_s` | Back-left wheel ω (rad/s) |
-| `q4_rad` | Joint 4 angle (rad), calf-up convention |
-| `dq4_rad_s` | Joint 4 angular velocity (rad/s) |
-| `w_br_rad_s` | Back-right wheel ω (rad/s) |
+| `time_s` | Seconds from the start of the transition |
+| `q1_rad` … `q4_rad` | Joint motor positions (rad) |
+| `dq1_rad_s` … `dq4_rad_s` | Joint motor speeds at the waypoint (rad/s) |
+| `w_front_a_rad_s`, `w_front_b_rad_s`, `w_back_a_rad_s`, `w_back_b_rad_s` | Wheel motor speeds (rad/s): front arm A, front arm B, back arm A, back arm B |
 
-Each joint is paired with its nearest wheel: q1 ↔ front-left (arm-A), q2 ↔ front-right (arm-B), q3 ↔ back-left, q4 ↔ back-right. Wheel ω is 0 during pivot and air frames.
+All values are in each motor's own convention, set in `traj_solver/motor_calibration.py` (`position = offset + sign × ratio × angle`). Its entries are pass-throughs until measured, which makes the file the display convention: q1/q4 0 = link straight up from its calf, q2/q3 0 = straight, counter-clockwise positive in the side view. After changing the calibration, re-run `robot_timing.py`.
+
+- **Joint speeds** use the steps on both sides of each waypoint (monotone "PCHIP" rule), so the cubic Hermite curve that `playback.py` follows between waypoints never overshoots a waypoint, and a joint holding still stays still. First and last waypoints have speed 0.
+- **Wheel speeds** are taken from the motion plan at each waypoint's instant and are relative to the wheel's own assembly, which is what its motor turns at. A wheel rolling over a corner with its assembly reads 0; a wheel in the air ramps linearly to its landing speed.
+
+`Motor/homing.py` moves the joints to the first row; `Motor/playback.py` plays the file at 100 Hz with cubic Hermite interpolation, timed from `time_s`.
 
 ## Solver
 
@@ -208,7 +204,9 @@ traj_solver/
                          CEILING_Y, EDGE_X, EDGE_Y, N_FRAMES, and all WTC/FTW/OUT
                          phase timing constants
   wheel_omega.py         wheel ω + joint-angle graphs
-  robot_timing.py        per-frame joint angles + wheel speeds → timings/*.csv
+  trajectory.py          solve_trajectory: solves a transition, cached in .cache/
+  robot_timing.py        waypoints for the robot → timings/*.csv
+  motor_calibration.py   per-motor zero offset, direction sign, gear ratio
   keyframes.py           grid of all keyframe poses → keyframes/*.png
   solver.py              grid sweep + analytic IK + BFGS polish
   constraints.py         penalty terms, surface-contact helpers, WheelGeometry

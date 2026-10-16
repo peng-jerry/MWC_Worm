@@ -1,31 +1,43 @@
 """
-robot_timing.py — export per-frame joint angles and wheel speeds for physical robot control.
+robot_timing.py — export each transition as a timing file for the robot
+(Motor/homing.py, Motor/playback.py).
 
 Usage:
     python robot_timing.py [scenario | all]     default: all
 
-Outputs one CSV per scenario to traj_solver/timings/ with 13 columns:
+Writes timings/<scenario>.csv: a header of '#' lines (units, conventions,
+the calibration used and how to interpolate), then one row per waypoint:
 
-  time_s | q1_rad  dq1_rad_s  w_fl_rad_s | q2_rad  dq2_rad_s  w_fr_rad_s |
-          | q3_rad  dq3_rad_s  w_bl_rad_s | q4_rad  dq4_rad_s  w_br_rad_s
+  time_s                     seconds from the start of the transition
+  q1_rad … q4_rad            joint motor positions (rad)
+  dq1_rad_s … dq4_rad_s      joint motor speeds at the waypoint (rad/s)
+  w_front_a_rad_s,           wheel motor speeds (rad/s): front arm A, front arm B,
+  w_front_b_rad_s, …         back arm A, back arm B
 
-  time_s        seconds from the start of the transition
-  q1–q4         joint angles (rad), display/calf-up convention (0 = straight up from calf)
-  dq1–dq4       joint angular velocity (rad/s): change since the previous frame ÷ frame interval
-  w_fl / w_fr   front assembly arm-A / arm-B wheel ω (rad/s), CCW positive
-  w_bl / w_br   back assembly  arm-A / arm-B wheel ω (rad/s), CCW positive
+Every value is in its motor's own convention (motor_calibration.py).  With
+the calibration table at its pass-through defaults that is the display
+convention (kinematics.q_display), counter-clockwise positive in the side view.
 
-Column grouping pairs each chain joint with one wheel:
-  q1 ↔ front arm-A wheel    q2 ↔ front arm-B wheel
-  q3 ↔ back arm-A wheel     q4 ↔ back arm-B wheel
+Joint speeds
+------------
+Between waypoints the playback moves each joint along the cubic through its
+position and speed at both ends (cubic Hermite interpolation).  The speed at
+a waypoint uses the steps on both sides of it, by the monotone ("PCHIP") rule
+of Fritsch and Carlson: a weighted harmonic mean of the two step speeds when
+they have the same sign, and 0 where the joint stops or turns back.  So the
+cubic never overshoots a waypoint (every waypoint was checked by the
+solver), and a joint holding still between two waypoints stays still.  The
+first and last waypoints have speed 0: the joints start and end at rest, in
+the cruise posture.
 
-Wheel ω is the rolling rate on whichever surface the wheel touches
-(scenarios.wheel_spin): ω = (ẑ × n)·Δcentre / (r Δt) for surface normal n,
-and 0 while a wheel is at the corner, in the air or touching both surfaces.
+Wheel speeds
+------------
+From the motion plan at each waypoint's instant, relative to the wheel's own
+assembly — what the wheel's motor must turn at (scenarios.wheel_speeds).
+Between waypoints the playback changes them linearly.
 
 The waypoint rate is timing.SAMPLE_RATE (6 by default; override with e.g.
-TRAJ_SAMPLE_RATE=3).  Transition durations come from the speed limits in
-timing.py and the phases in scenarios.py.
+TRAJ_SAMPLE_RATE=3).
 """
 
 import csv
@@ -35,46 +47,103 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from animate_transition import solve_trajectory
 from kinematics import q_display
-from scenarios import SCENARIOS, wheel_spin
+from motor_calibration import JOINTS, WHEELS
+from scenarios import SCENARIOS, wheel_speeds
+from trajectory import solve_trajectory
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.path.join(_SCRIPT_DIR, "timings")
 
-HEADER = [
-    "time_s",
-    "q1_rad", "dq1_rad_s", "w_fl_rad_s",
-    "q2_rad", "dq2_rad_s", "w_fr_rad_s",
-    "q3_rad", "dq3_rad_s", "w_bl_rad_s",
-    "q4_rad", "dq4_rad_s", "w_br_rad_s",
-]
+COLUMNS = (["time_s"]
+           + [f"{j}_rad" for j in JOINTS]
+           + [f"d{j}_rad_s" for j in JOINTS]
+           + [f"w_{w}_rad_s" for w in WHEELS])
+
+
+def joint_speeds(times, qs):
+    """
+    Speed (rad/s) of each joint at each waypoint, for angles qs (N, J) at
+    times (N,): the monotone rule of the module docstring, 0 at both ends.
+    """
+    h = np.diff(times)[:, None]
+    step = np.diff(qs, axis=0) / h                   # speed over each step
+    s0, s1, h0, h1 = step[:-1], step[1:], h[:-1], h[1:]
+    w0, w1 = 2 * h1 + h0, h1 + 2 * h0                # Fritsch–Butland weights
+    v = np.zeros_like(qs)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        v[1:-1] = np.where(s0 * s1 > 0, (w0 + w1) / (w0 / s0 + w1 / s1), 0.0)
+    return v
+
+
+def _header(scn, traj):
+    """The '#' lines at the top of a timing file."""
+    joint_cal = "\n".join(f"#   {name:8s} {m.offset:+.6f}  {m.sign:+d}  {m.ratio:g}"
+                          for name, m in JOINTS.items())
+    wheel_cal = "\n".join(f"#   {name:8s}     -      {m.sign:+d}  {m.ratio:g}"
+                          for name, m in WHEELS.items())
+    return f"""\
+# {scn.label}: timing file for Motor/playback.py
+# Written by traj_solver/robot_timing.py from solve {traj.key[:16]}
+# {len(traj)} waypoints, {traj.rate:g} per second, {traj.times[-1]:.3f} s
+#
+# Columns
+#   time_s                      seconds from the start of the transition
+#   q1_rad .. q4_rad            joint motor positions (rad)
+#   dq1_rad_s .. dq4_rad_s      joint motor speeds at the waypoint (rad/s)
+#   w_front_a_rad_s ..          wheel motor speeds (rad/s): front arm A, front arm B,
+#                               back arm A, back arm B
+#
+# Between waypoints each joint follows the cubic through its position and speed
+# at both ends (cubic Hermite); wheel speeds change linearly.  The joints are at
+# rest at the first and last waypoint.
+#
+# Values are in each motor's own convention (traj_solver/motor_calibration.py):
+#   joint motor position = offset + sign * ratio * joint angle
+#   motor speed          = sign * ratio * joint or wheel speed
+# joint angle: q1/q4 0 = link straight up from its calf, q2/q3 0 = straight,
+#   counter-clockwise positive in the side view (as in the plots)
+# wheel speed: relative to the wheel's own assembly, counter-clockwise positive
+#   in the side view
+#   motor    offset_rad  sign  ratio
+{joint_cal}
+{wheel_cal}
+"""
 
 
 def export(name, out_dir=OUT_DIR):
-    """Solve one transition and write its CSV; returns the output path."""
+    """Solve one transition (or load it from the cache) and write its timing
+    file; returns the output path."""
     scn = SCENARIOS[name]
     traj = solve_trajectory(scn)
 
     # Joint angles in display convention, unwrapped so ±π crossings stay continuous.
-    qs = np.unwrap(np.array([q_display(q) for q in traj.Q]), axis=0)
-    # Joint velocity over the step that ends at each frame (0 at frame 0).
-    dqs = np.diff(qs, axis=0, prepend=qs[[0]]) / np.diff(traj.times, prepend=-1.0)[:, None]
-    dqs[0] = 0.0
-    spin = wheel_spin(scn, traj.poses, traj.times)          # (N, 4) fl, fr, bl, br
+    angles = np.unwrap(q_display(traj.Q), axis=0)
+    rates = joint_speeds(traj.times, angles)
+    _, wheel = wheel_speeds(scn, traj.phases, traj.times)
+
+    columns = [traj.times]
+    columns += [m.position(angles[:, j]) for j, m in enumerate(JOINTS.values())]
+    columns += [m.speed(rates[:, j]) for j, m in enumerate(JOINTS.values())]
+    columns += [m.speed(wheel[:, j]) for j, m in enumerate(WHEELS.values())]
 
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, f"{name}.csv")
     with open(path, "w", newline="") as fh:
+        fh.write(_header(scn, traj))
         writer = csv.writer(fh)
-        writer.writerow(HEADER)
-        for k, t in enumerate(traj.times):
-            row = [f"{t:.6f}"]
-            for j in range(4):
-                row += [f"{qs[k, j]:.6f}", f"{dqs[k, j]:.6f}", f"{spin[k, j]:.6f}"]
-            writer.writerow(row)
-    print(f"{name}: {traj.times[-1]:.1f} s, {len(traj)} frames at {traj.rate:g} Hz → {path}")
+        writer.writerow(COLUMNS)
+        for row in zip(*columns):
+            writer.writerow([f"{v:.6f}" for v in row])
+    print(f"{name}: {traj.times[-1]:.1f} s, {len(traj)} waypoints at {traj.rate:g} Hz → {path}")
     return path
+
+
+def read_timing(path):
+    """The columns of a timing file, {column name: (N,) array}, in motor units."""
+    with open(path, newline="") as fh:
+        rows = list(csv.DictReader(line for line in fh if not line.startswith("#")))
+    return {name: np.array([float(row[name]) for row in rows]) for name in rows[0]}
 
 
 def main():

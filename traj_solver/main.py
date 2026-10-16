@@ -22,7 +22,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from animate_transition import solve_trajectory, draw_frame, plot_limits
+from animate_transition import draw_frame, plot_limits
+from trajectory import solve_trajectory
 from kinematics import q_display
 from scenarios import SCENARIOS, l1, l2, l3
 

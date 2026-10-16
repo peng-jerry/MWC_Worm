@@ -7,8 +7,10 @@ Usage:
 
 Solves the transition exactly as animate_transition.py does and plots, against
 time, with the phase boundaries marked:
-  1. wheel spin of all four wheels (rad/s, CCW positive; scenarios.wheel_spin)
-     with the rolling-speed limit SLIDE_SPEED / wheel radius
+  1. wheel motor speed of all four wheels — relative to the wheel's
+     assembly, as in the timing files (rad/s, CCW positive;
+     scenarios.wheel_speeds) — with the rolling-speed limit
+     SLIDE_SPEED / wheel radius
   2. joint angles q1–q4 (display convention) with the soft and hard joint
      limits from constraints.py
   3. joint speeds (°/s) with the joint speed limit
@@ -25,10 +27,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from animate_transition import solve_trajectory
+from trajectory import solve_trajectory
 from constraints import JOINT_HARD_LIMIT_DEG, JOINT_SOFT_LIMIT_DEG
 from kinematics import q_display
-from scenarios import SCENARIOS, wheel_spin
+from scenarios import SCENARIOS, wheel_speeds
 from timing import MAX_JOINT_SPEED, SLIDE_SPEED
 
 OUT_NAMES = {"floor_to_wall": "wheel_omega_ftw.png", "wall_to_ceiling": "wheel_omega_wtc.png",
@@ -39,7 +41,7 @@ def plot(name, out_dir):
     scn = SCENARIOS[name]
     traj = solve_trajectory(scn)
     t = traj.times
-    spin = wheel_spin(scn, traj.poses, t)
+    _, spin = wheel_speeds(scn, traj.phases, t)
     qs = np.degrees(np.unwrap(np.array([q_display(q) for q in traj.Q]), axis=0))
     dqs = np.diff(qs, axis=0) / np.diff(t)[:, None]          # °/s over each step
     t_mid = 0.5 * (t[1:] + t[:-1])
@@ -58,7 +60,7 @@ def plot(name, out_dir):
         ax1.axhline(sgn * omega_lim, color="orange", lw=0.8, linestyle="--", alpha=0.6,
                     label=f"rolling limit ±{omega_lim:.1f}" if sgn > 0 else None)
     ax1.axhline(0, color="black", lw=0.6, linestyle=":")
-    ax1.set_ylabel("Wheel spin (rad/s)")
+    ax1.set_ylabel("Wheel motor speed (rad/s)")
     ax1.legend(loc="upper right", fontsize=9, ncol=3)
 
     # 2 joint angles

@@ -467,6 +467,30 @@ def phase_starts(phases):
     return np.concatenate([[0.0], np.cumsum([p.duration for p in phases])])
 
 
+def _phase_index(starts, t):
+    """Index of the phase running at time t, given phase_starts."""
+    return min(int(np.searchsorted(starts, t, side="right")) - 1, len(starts) - 2)
+
+
+def plan_pose(scn, phases, t):
+    """
+    The planned assembly poses at time t (s; clamped to the plan), as a dict
+    of x1, y1, theta1 (front) and x2, y2, theta2 (back).  The plan is
+    continuous in time, so it can be evaluated between frames.
+    """
+    starts = phase_starts(phases)
+    t = min(max(t, 0.0), starts[-1])
+    i = _phase_index(starts, t)
+    f = min(max((t - starts[i]) / phases[i].duration, 0.0), 1.0)
+    lead_xy, lead_th, trail_xy, trail_th = phases[i].pose(f)
+    if scn.lead == "front":
+        (p1, th1), (p2, th2) = (lead_xy, lead_th), (trail_xy, trail_th)
+    else:
+        (p1, th1), (p2, th2) = (trail_xy, trail_th), (lead_xy, lead_th)
+    return {"x1": p1[0], "y1": p1[1], "theta1": th1,
+            "x2": p2[0], "y2": p2[1], "theta2": th2}
+
+
 def sample_poses(scn, phases, rate):
     """
     Assembly poses at evenly spaced times through the phases, about `rate`
@@ -483,23 +507,16 @@ def sample_poses(scn, phases, rate):
     times = np.linspace(0.0, total, int(round(total * rate)) + 1)
     poses = []
     for t in times:
-        i = min(int(np.searchsorted(starts, t, side="right")) - 1, len(phases) - 1)
-        f = min(max((t - starts[i]) / phases[i].duration, 0.0), 1.0)
-        lead_xy, lead_th, trail_xy, trail_th = phases[i].pose(f)
-        if scn.lead == "front":
-            (p1, th1), (p2, th2) = (lead_xy, lead_th), (trail_xy, trail_th)
-        else:
-            (p1, th1), (p2, th2) = (trail_xy, trail_th), (lead_xy, lead_th)
-        gap = float(np.hypot(*(p2 - p1)))
+        pose = plan_pose(scn, phases, t)
+        name = phases[_phase_index(starts, t)].name
+        gap = float(np.hypot(pose["x2"] - pose["x1"], pose["y2"] - pose["y1"]))
         if gap > CHAIN_LENGTH:
             raise ValueError(f"{scn.name}: chain joints {gap:.3f} m apart at t = {t:.2f} s "
-                             f"({phases[i].name}), beyond the chain's reach")
-        pose = {"x1": p1[0], "y1": p1[1], "theta1": th1,
-                "x2": p2[0], "y2": p2[1], "theta2": th2}
+                             f"({name}), beyond the chain's reach")
         problems = check_assemblies(scn, pose)
         if problems:
             listed = ", ".join(f"{k} ({v * 1000:+.1f} mm)" for k, v in problems.items())
-            raise ValueError(f"{scn.name}: at t = {t:.2f} s ({phases[i].name}): {listed}")
+            raise ValueError(f"{scn.name}: at t = {t:.2f} s ({name}): {listed}")
         poses.append(pose)
     return times, poses
 
@@ -619,43 +636,86 @@ def cruise_posture(scn, pose):
 
 # ── Wheel contact ─────────────────────────────────────────────────────────────
 
-def wheel_spin(scn, poses, times, tol=0.004):
-    """
-    Spin of each wheel (rad/s, counter-clockwise positive), shape (N, 4):
-    front arm A, front arm B, back arm A, back arm B.
+WHEELS = ("front arm A", "front arm B", "back arm A", "back arm B")
+LEAVING_SPEED = 1e-6    # m/s; a wheel moving away from a contact faster than this is leaving it
 
-    A wheel is rolling on a face of the solid (either surface, or a plate's
-    end face) when its centre is one wheel radius from the face (within tol)
-    and alongside it, in this frame and the previous one, and it is touching
-    no other face.  Rolling without slipping gives
-        ω = (ẑ × n) · Δcentre / (r Δt)
-    with n the face normal.  Wheels at a corner, in the air or touching two
-    faces get 0.  Frame 0 copies frame 1.
+
+def wheel_speeds(scn, phases, times, h=1e-4, tol=FEASIBILITY_TOL):
+    """
+    How fast each wheel turns at each time, from the motion plan (rad/s,
+    counter-clockwise positive in the side view).  Returns (rolling, motor),
+    each (N, 4) in the order of WHEELS:
+
+      rolling  the wheel's spin in the world
+      motor    its spin relative to its own assembly — rolling minus the
+               assembly's turn rate — which is what the wheel's motor must
+               turn at.  The two differ while an assembly pivots.
+
+    Velocities are taken from the plan at each instant (central differences
+    over ±h seconds, which is continuous between frames), not from the steps
+    between frames.
+
+    A wheel touches the solid where its centre is one wheel radius (within
+    tol) from a face or from a corner.  For a contact whose direction from the
+    touching point to the wheel centre is n, rolling without slipping gives
+
+        ω = (ẑ × n) · v / r        (v the wheel centre's velocity)
+
+    on a face and over a corner alike: over a corner the wheel turns with the
+    assembly about the touching point.  A contact the wheel is moving away
+    from (v · n > LEAVING_SPEED) is being left and does not count.  Then:
+
+      one contact      ω from it
+      two contacts     wedged into an inside corner: the mean, which is 0
+                       while the wheel stays wedged (it cannot roll along
+                       both faces at once)
+      none             in the air: the motor speed is interpolated in time
+                       between the nearest contacts before and after, so the
+                       wheel is already turning at the right speed when it
+                       lands
     """
     r = scn.wg.wheel_r
-    faces = scn.env.faces
+    segments = scn.env.face_segments()
+    end = phase_starts(phases)[-1]
 
-    def touching(w):
-        """Index of the single face the wheel centre w touches, or None."""
-        hits = [i for i, f in enumerate(faces)
-                if abs(f.normal @ (w - f.origin) - r) <= tol
-                and -tol <= f.tangent @ (w - f.origin) <= f.length + tol]
-        return hits[0] if len(hits) == 1 else None
+    def centres(pose):
+        return np.array([*wheel_centers(pose["x1"], pose["y1"], pose["theta1"], scn.wg, side=1),
+                         *wheel_centers(pose["x2"], pose["y2"], pose["theta2"], scn.wg, side=-1)])
 
-    centres = np.array([[*wheel_centers(p["x1"], p["y1"], p["theta1"], scn.wg, side=1),
-                         *wheel_centers(p["x2"], p["y2"], p["theta2"], scn.wg, side=-1)]
-                        for p in poses])                       # (N, 4 wheels, 2)
-    spin = np.zeros((len(poses), 4))
-    for k in range(1, len(poses)):
-        dt = times[k] - times[k - 1]
+    def headings(pose):
+        return np.array([pose["theta1"], pose["theta1"], pose["theta2"], pose["theta2"]])
+
+    rolling = np.full((len(times), 4), np.nan)        # NaN until a contact sets it
+    turn = np.empty((len(times), 4))
+    for k, t in enumerate(times):
+        ta, tb = max(t - h, 0.0), min(t + h, end)
+        before, now, after = (plan_pose(scn, phases, s) for s in (ta, t, tb))
+        c = centres(now)
+        v = (centres(after) - centres(before)) / (tb - ta)
+        turn[k] = _wrap(headings(after) - headings(before)) / (tb - ta)
         for j in range(4):
-            s_now, s_prev = touching(centres[k, j]), touching(centres[k - 1, j])
-            if s_now is not None and s_now == s_prev:
-                n = faces[s_now].normal
-                roll_dir = np.array([-n[1], n[0]])             # ẑ × n
-                spin[k, j] = roll_dir @ (centres[k, j] - centres[k - 1, j]) / (r * dt)
-    spin[0] = spin[1]
-    return spin
+            rates, points = [], []
+            for a, b in segments:
+                ab = b - a
+                p = a + np.clip((c[j] - a) @ ab / (ab @ ab), 0.0, 1.0) * ab   # nearest point
+                d = float(np.linalg.norm(c[j] - p))
+                if abs(d - r) > tol or any(np.allclose(p, q, atol=1e-9) for q in points):
+                    continue        # not touching, or a corner already counted from the other face
+                points.append(p)
+                n = (c[j] - p) / d
+                if v[j] @ n <= LEAVING_SPEED:
+                    rates.append(np.array([-n[1], n[0]]) @ v[j] / r)
+            if rates:
+                rolling[k, j] = np.mean(rates)
+
+    motor = rolling - turn
+    for j in range(4):
+        air = np.isnan(motor[:, j])
+        if air.all():
+            motor[:, j] = 0.0
+        elif air.any():
+            motor[air, j] = np.interp(times[air], times[~air], motor[~air, j])
+    return motor + turn, motor
 
 
 # ── The four transitions ──────────────────────────────────────────────────────

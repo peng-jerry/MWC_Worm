@@ -9,18 +9,21 @@ Usage:
 
 Run homing.py first to reach the start pose before executing this script.
 
-Each CSV row is a frame at PHYSICAL_FPS = 3 fr/s (333 ms apart).  Between
-frames the script generates sub-steps at INTERP_HZ using Tustin's method
-(trapezoidal velocity integration):
+Each CSV row is a waypoint at time time_s (traj_solver/robot_timing.py).
+Every 1/INTERP_HZ seconds the script sends each joint the point at that
+moment on the cubic through its position and speed at the two surrounding
+waypoints (cubic Hermite interpolation):
 
-    q(α) = q[k]  +  T · (α·dq[k]  +  α²/2 · (dq[k+1] − dq[k]))
+    q(α) = h00(α)·q[k] + h10(α)·T·dq[k] + h01(α)·q[k+1] + h11(α)·T·dq[k+1]
 
-where α ∈ [0,1] is the normalised position within the frame interval and T is
-the frame period.  Velocity ramps linearly between the two CSV samples, so
-the position curve is a parabolic arc rather than a straight line.  At each
-frame boundary q is hard-reset to the CSV value to prevent drift.
+with α ∈ [0, 1] the fraction of the way from waypoint k to k+1 and T the time
+between them.  The curve passes exactly through every waypoint with the
+waypoint's speed, so the motion is smooth across waypoints.
+traj_solver/playback_check.py simulates this same interpolation.
 
-JOINT_OFFSET must match homing.py — both scripts use the same calibration.
+The CSV is already in each motor's own units (calibration lives in
+traj_solver/motor_calibration.py), so positions are sent as they are.
+Wheel speed columns are not used yet.
 """
 
 import sys
@@ -46,12 +49,10 @@ BAUDRATE  = 8_000_000
 # Motor IDs for q1 → q4
 MOTOR_IDS = [1, 2, 3, 4]
 
-# Raw encoder value when q_display == 0  (set from physical calibration)
-JOINT_OFFSET = [0.0, 0.0, 0.0, 0.0]
-
 # ── Playback timing ───────────────────────────────────────────────────────────
-PHYSICAL_FPS = 3      # fr/s — must match robot_timing.py
-INTERP_HZ    = 20     # command update rate (Hz); interpolates between CSV frames
+# Command update rate (Hz).  If the PC cannot send all goals within one
+# update, the late count printed at the end says so — lower it if that is large.
+INTERP_HZ = 100
 
 # ── Position PID ──────────────────────────────────────────────────────────────
 P_GAIN_POS = 5.0
@@ -83,46 +84,34 @@ def read1(getter, motor_id):
     data_list, err = getter(motor_id)[0]
     return data_list[0], err
 
-def display_to_raw(q_display):
-    return [q + JOINT_OFFSET[i] for i, q in enumerate(q_display)]
-
 def load_csv(scenario):
-    """Return (positions, velocities) — each a list of 4-element lists [q1..q4]."""
+    """Return (times, positions, velocities): waypoint times (s) and, per
+    waypoint, [q1..q4] positions (rad) and speeds (rad/s) in motor units."""
     path = os.path.join(_TIMINGS_DIR, f"{scenario}.csv")
     if not os.path.exists(path):
         print(f"CSV not found: {path}")
         sys.exit(1)
+    times      = []
     positions  = []
     velocities = []
     with open(path, newline="") as fh:
-        for row in csv.DictReader(fh):
-            positions.append([
-                float(row["q1_rad"]),
-                float(row["q2_rad"]),
-                float(row["q3_rad"]),
-                float(row["q4_rad"]),
-            ])
-            velocities.append([
-                float(row["dq1_rad_s"]),
-                float(row["dq2_rad_s"]),
-                float(row["dq3_rad_s"]),
-                float(row["dq4_rad_s"]),
-            ])
-    return positions, velocities
+        for row in csv.DictReader(line for line in fh if not line.startswith("#")):
+            times.append(float(row["time_s"]))
+            positions.append([float(row[f"q{j}_rad"]) for j in range(1, 5)])
+            velocities.append([float(row[f"dq{j}_rad_s"]) for j in range(1, 5)])
+    return times, positions, velocities
 
-def tustin_interp(q_k, dq_k, dq_k1, T, alpha):
+def hermite(q_k, dq_k, q_k1, dq_k1, T, alpha):
     """
-    Trapezoidal (Tustin) position at normalised time alpha in [0, 1].
-
-    Velocity ramps linearly from dq_k to dq_k1 over the frame interval T.
-    Integrating gives a parabolic position arc:
-
-        q(α) = q[k]  +  T · (α·dq[k]  +  α²/2 · (dq[k+1] − dq[k]))
+    Cubic Hermite position at normalised time alpha in [0, 1]: the cubic that
+    starts at q_k with speed dq_k and ends T seconds later at q_k1 with speed
+    dq_k1.  Same formula as traj_solver/playback_check.py.
     """
-    return [
-        q_k[j] + T * (alpha * dq_k[j] + 0.5 * alpha**2 * (dq_k1[j] - dq_k[j]))
-        for j in range(len(q_k))
-    ]
+    a2, a3 = alpha * alpha, alpha * alpha * alpha
+    h00, h10 = 2 * a3 - 3 * a2 + 1, a3 - 2 * a2 + alpha
+    h01, h11 = -2 * a3 + 3 * a2, a3 - a2
+    return [h00 * q_k[j] + h10 * T * dq_k[j] + h01 * q_k1[j] + h11 * T * dq_k1[j]
+            for j in range(len(q_k))]
 
 def disable_motor(bear, motor_id, tries=5, delay=0.02):
     for _ in range(tries):
@@ -141,21 +130,19 @@ if len(sys.argv) < 2 or sys.argv[1] not in SCENARIO_NAMES:
     print(f"  scenarios: {SCENARIO_NAMES}")
     sys.exit(1)
 
-scenario           = sys.argv[1]
-frames, velocities = load_csv(scenario)
-n_frames           = len(frames)
+scenario                  = sys.argv[1]
+times, frames, velocities = load_csv(scenario)
+n_frames                  = len(frames)
 
 print(f"\nScenario : {scenario}")
-print(f"Frames   : {n_frames}  ({n_frames / PHYSICAL_FPS:.1f}s at {PHYSICAL_FPS} fr/s)")
-print(f"Command  : every {1000/INTERP_HZ:.0f}ms  "
-      f"(~{round(INTERP_HZ / PHYSICAL_FPS)} steps per CSV frame, Tustin interp)")
+print(f"Waypoints: {n_frames}  ({times[-1]:.1f}s, {(n_frames - 1) / times[-1]:g} per second)")
+print(f"Command  : every {1000/INTERP_HZ:.0f}ms  (cubic Hermite between waypoints)")
 
-# Start pose
-target_display = frames[0]
-target_raw     = display_to_raw(target_display)
+# Start pose (motor units)
+target_raw = frames[0]
 
 print(f"\nStart pose:")
-for i, q in enumerate(target_display):
+for i, q in enumerate(target_raw):
     print(f"  q{i+1} = {math.degrees(q):+.1f}°  (motor {MOTOR_IDS[i]})")
 
 # Connect
@@ -212,42 +199,41 @@ for i in (3, 2, 1):
 print("  GO\n")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Playback loop  (Tustin / trapezoidal interpolation)
+# Playback loop  (cubic Hermite interpolation)
 # ══════════════════════════════════════════════════════════════════════════════
-frame_dt = 1.0 / PHYSICAL_FPS                        # 0.333 s per CSV row
-n_interp = max(1, round(frame_dt * INTERP_HZ))        # ~7 sub-steps per frame
+n_ticks = int(round(times[-1] * INTERP_HZ))
+k       = 0       # current segment: times[k] <= t <= times[k + 1]
+late    = 0       # updates sent more than one update interval behind schedule
 
 t_start = time.time()
 
 try:
-    for fi in range(n_frames - 1):
-        # Hard-reset to CSV position at frame boundary — prevents drift
-        q_k   = display_to_raw(frames[fi])
-        dq_k  = velocities[fi]
-        dq_k1 = velocities[fi + 1]
+    for tick in range(n_ticks + 1):
+        t = min(tick / INTERP_HZ, times[-1])
+        wait = t_start + t - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        elif wait < -1.0 / INTERP_HZ:
+            late += 1
 
-        for step in range(n_interp):
-            alpha = step / n_interp                   # 0 → just under 1
-            t_cmd = t_start + (fi + alpha) * frame_dt
-            # Tustin interp works in raw encoder space (q_k already offset-corrected)
-            goals = tustin_interp(q_k, dq_k, dq_k1, frame_dt, alpha)
-            for mid, g in zip(MOTOR_IDS, goals):
-                bear.set_goal_position((mid, g))
-
-            wait = t_cmd - time.time()
-            if wait > 0:
-                time.sleep(wait)
-
-        elapsed = time.time() - t_start
-        print(f"\r  frame {fi+1:3d}/{n_frames}  t={elapsed:.2f}s", end="", flush=True)
+        while k < n_frames - 2 and t >= times[k + 1]:
+            k += 1
+            print(f"\r  waypoint {k:3d}/{n_frames - 1}  t={time.time() - t_start:.2f}s",
+                  end="", flush=True)
+        T     = times[k + 1] - times[k]
+        alpha = min(max((t - times[k]) / T, 0.0), 1.0)
+        goals = hermite(frames[k], velocities[k], frames[k + 1], velocities[k + 1], T, alpha)
+        for mid, g in zip(MOTOR_IDS, goals):
+            bear.set_goal_position((mid, g))
 
     # Hold final pose
-    final_raw = display_to_raw(frames[-1])
-    for mid, g in zip(MOTOR_IDS, final_raw):
+    for mid, g in zip(MOTOR_IDS, frames[-1]):
         bear.set_goal_position((mid, g))
 
     total = time.time() - t_start
-    print(f"\n\nPlayback complete — {total:.2f}s  ({n_frames} frames)")
+    print(f"\n\nPlayback complete — {total:.2f}s of {times[-1]:.2f}s planned  ({n_frames} waypoints)")
+    print(f"Late updates: {late} of {n_ticks + 1}"
+          + ("  ← the PC could not keep up; lower INTERP_HZ" if late > 0.01 * (n_ticks + 1) else ""))
 
 except KeyboardInterrupt:
     print("\n\nInterrupted — holding current position.")
