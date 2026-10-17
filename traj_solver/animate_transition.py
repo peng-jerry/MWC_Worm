@@ -3,8 +3,9 @@ animate_transition.py — solve a transition's joint angles, check them, render 
 
 Pipeline
 --------
-  scenarios.py       geometry and the five phases of each transition
-                     (approach, pivot, both move, pivot, depart)
+  scenarios.py       geometry and the six phases of each transition
+                     (approach, pivot, roll clear, roll up, pivot, depart),
+                     each easing in and out of rest
   trajectory.py      solve_trajectory: samples the phases at
                      timing.SAMPLE_RATE and lets trajectory_ik choose every
                      frame's joint angles together (cached between runs)

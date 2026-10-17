@@ -132,6 +132,11 @@ python wheel_omega.py thin_edge
 python robot_timing.py                  # all 4 scenarios
 python robot_timing.py floor_to_wall    # single scenario
 
+# Play the timing files as Motor/playback.py does (100 Hz) and measure the motion
+# between waypoints: chain gap, clearance, joint/wheel speed and acceleration:
+python playback_check.py                # all 4 scenarios, from timings/*.csv
+python playback_check.py --rate 12      # solve at 12 waypoints/s instead (writes no files)
+
 # Render all keyframe poses as a grid (saves PNG):
 python keyframes.py                     # all 4 scenarios
 python keyframes.py outside             # single scenario
@@ -206,6 +211,7 @@ traj_solver/
   wheel_omega.py         wheel ω + joint-angle graphs
   trajectory.py          solve_trajectory: solves a transition, cached in .cache/
   robot_timing.py        waypoints for the robot → timings/*.csv
+  playback_check.py      simulates Motor/playback.py and measures between waypoints
   motor_calibration.py   per-motor zero offset, direction sign, gear ratio
   keyframes.py           grid of all keyframe poses → keyframes/*.png
   solver.py              grid sweep + analytic IK + BFGS polish

@@ -1,13 +1,13 @@
 """
-main.py — snapshot of one transition, halfway through its "both move" phase.
+main.py — snapshot of one transition, between its two rolling phases.
 
 Usage:
     python main.py [scenario]
     Scenarios: floor_to_wall (default), wall_to_ceiling, outside, thin_edge
 
 Solves the transition exactly as animate_transition.py does and draws the
-frame in the middle of phase 3, when one assembly is across and the other is
-not.  Joint angles are printed in the calf-up display convention (q1/q4: 0° =
+frame at the end of phase 3, when the leading assembly has rolled clear of
+the transition and the trailing one has not yet rolled up to it.  Joint angles are printed in the calf-up display convention (q1/q4: 0° =
 link straight up from the calf).
 
 Writes robot_configs/robot_config_<scenario>.png.
@@ -36,12 +36,10 @@ def main():
     scn = SCENARIOS[name]
     traj = solve_trajectory(scn)
 
-    # The frame halfway through phase 3 ("both move").
-    starts = traj.phase_starts
-    t_mid = 0.5 * (starts[2] + starts[3])
-    k = int(np.argmin(np.abs(traj.times - t_mid)))
+    # The frame at the end of phase 3 (leading assembly rolled clear).
+    k = int(np.argmin(np.abs(traj.times - traj.phase_starts[3])))
     q, info, p = traj.Q[k], traj.infos[k], traj.poses[k]
-    label = f"{scn.label} — t = {traj.times[k]:.1f} s of {traj.times[-1]:.1f} s ({traj.phases[2].name})"
+    label = f"{scn.label} — t = {traj.times[k]:.1f} s of {traj.times[-1]:.1f} s (after {traj.phases[2].name})"
 
     print("=" * 60)
     print(f"  Snapshot: {label}")

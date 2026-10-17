@@ -31,3 +31,10 @@ PLAN_JOINT_SPEED = np.radians(21.0)   # rad/s, what the solver plans to: ~3% mar
                                       # under MAX_JOINT_SPEED for tracking error
 SLIDE_SPEED      = 0.105              # m/s, top speed of any assembly while rolling
 PIVOT_RATE       = np.radians(15.0)   # rad/s, how fast an assembly turns while pivoting
+
+# Every phase starts and ends at rest: its speed ramps up from rest over the
+# first RAMP_TIME seconds along an S-curve and back down over the last
+# RAMP_TIME (scenarios.ease), so each phase is RAMP_TIME longer than at
+# constant speed.  Peak acceleration is π/2 × speed / RAMP_TIME: at 0.5 s,
+# 0.33 m/s² for an assembly at SLIDE_SPEED and 66°/s² for a joint at 21°/s.
+RAMP_TIME        = 0.5                # s

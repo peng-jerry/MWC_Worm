@@ -1,18 +1,23 @@
 """
-scenarios.py — the four surface transitions, each built from geometry in five phases.
+scenarios.py — the four surface transitions, each built from geometry in six phases.
 
 Every transition carries the robot from one surface to another across an
 inside corner (floor → wall, wall → ceiling), an outside corner (top of a
 block → its side wall) or the end of a thin plate (top → underside).  All of
-them run through the same five phases:
+them run through the same six phases:
 
   1 approach    both assemblies roll toward the transition until the
                 leading one is ready to pivot
   2 pivot       the leading assembly turns onto the new surface
-  3 both move   the leading assembly rolls clear of the transition, then
-                the trailing assembly rolls up to it
-  4 pivot       the trailing assembly turns onto the new surface
-  5 depart      both roll away to the standard end
+  3 roll clear  the leading assembly rolls along the new surface, clear of
+                the transition
+  4 roll up     the trailing assembly rolls up to the transition
+  5 pivot       the trailing assembly turns onto the new surface
+  6 depart      both roll away to the standard end
+
+Each phase starts and ends at rest: its speed ramps up and back down along
+an S-curve (ease, timing.RAMP_TIME), so the robot never changes speed
+abruptly.
 
 "Gap" means the distance between the two chain joints (P0 on the front
 assembly, P3 on the back one).  What the partner of a pivoting assembly does
@@ -27,8 +32,8 @@ depends on the transition (Scenario.partner_follows):
                   computed for each transition (follow_gap): the gap that
                   keeps the joints farthest from their limits.
 
-In phase 3 the leading assembly moves first so the chain never folds up
-between the two surfaces.
+Phases 3 and 4 move the assemblies one after the other, leading one first,
+so the chain never folds up between the two surfaces.
 
 Every transition starts with its leading chain joint START_DISTANCE before the
 end of its approach surface and ends with its trailing chain joint
@@ -70,7 +75,7 @@ from constraints import (FEASIBILITY_TOL, HARD_CLEARANCE, WheelGeometry, assembl
 from environment import Environment, Surface
 from kinematics import q_display
 from solver import solve_branch_batch, posture_cost
-from timing import SAMPLE_RATE, SCHEDULE_STEP, SLIDE_SPEED, PIVOT_RATE
+from timing import SAMPLE_RATE, SCHEDULE_STEP, SLIDE_SPEED, PIVOT_RATE, RAMP_TIME
 
 
 # ── The robot ─────────────────────────────────────────────────────────────────
@@ -348,11 +353,36 @@ class Phase:
     pose: Callable
 
 
+def ease(tau, ramp):
+    """
+    How much of a phase's motion is done (0 … 1) at fraction tau ∈ [0, 1] of
+    its time.  The speed ramps up from rest over the first `ramp` of the time
+    along a raised-cosine S-curve, holds, and ramps back down to rest over
+    the last `ramp` (a fraction ≤ 0.5; at 0.5 there is no constant part).
+    Speed and acceleration are continuous, and the peak speed is
+    1 / (1 − ramp) times the average.
+    """
+    r = min(ramp, 0.5)
+    if r <= 0.0:
+        return tau
+    peak = 1.0 / (1.0 - r)
+
+    def ramp_up(x):                        # motion done x into the first ramp (x ≤ r)
+        return peak * (x / 2 - r / (2 * math.pi) * math.sin(math.pi * x / r))
+
+    if tau < r:
+        return ramp_up(tau)
+    if tau > 1.0 - r:
+        return 1.0 - ramp_up(1.0 - tau)
+    return peak * (tau - r / 2)
+
+
 def _phase_duration(pose, minimum):
     """
-    Seconds for a phase: long enough that neither assembly rolls faster than
-    SLIDE_SPEED or turns faster than PIVOT_RATE anywhere in it, and at least
-    `minimum`.  Rounded up to whole SCHEDULE_STEPs.
+    Seconds for a phase: long enough that, easing in and out (ease), neither
+    assembly rolls faster than SLIDE_SPEED or turns faster than PIVOT_RATE
+    anywhere in it — the time at constant speed plus RAMP_TIME — and at
+    least `minimum`.  Rounded up to whole SCHEDULE_STEPs.
     """
     f = np.linspace(0.0, 1.0, 401)
     samples = [pose(x) for x in f]
@@ -361,13 +391,13 @@ def _phase_duration(pose, minimum):
                                             axis=1))) for k in (0, 2)) / df
     turn = max(float(np.max(np.abs(np.diff(np.array([s[k] for s in samples])))))
                for k in (1, 3)) / df
-    seconds = max(slide / SLIDE_SPEED, turn / PIVOT_RATE, minimum)
+    seconds = max(max(slide / SLIDE_SPEED, turn / PIVOT_RATE) + RAMP_TIME, minimum)
     return max(1, math.ceil(seconds / SCHEDULE_STEP - 1e-9)) * SCHEDULE_STEP
 
 
 def plan_phases(scn, min_durations=None, gap=None):
     """
-    The five phases of a transition.
+    The six phases of a transition.
 
     gap: outside corners and edges only — the gap (m) the partner keeps while
     following a pivot.  Computed by follow_gap(scn) when not given.  Ignored
@@ -386,7 +416,6 @@ def plan_phases(scn, min_durations=None, gap=None):
         gap = C
     elif gap is None:
         gap = follow_gap(scn)
-    minimum = list(min_durations) if min_durations is not None else [0.0] * 5
 
     lead_ready = pivot_pose(scn, lead, 0.0)[0]       # leading assembly about to pivot
     trail_ready = pivot_pose(scn, trail, 0.0)[0]     # trailing assembly about to pivot
@@ -423,28 +452,25 @@ def plan_phases(scn, min_durations=None, gap=None):
         J, theta = pivot_pose(scn, lead, f)
         return J, theta, trail_partner(J), thA
 
-    # 4 the trailing assembly pivots; the leading one parks or follows.
+    # 5 the trailing assembly pivots; the leading one parks or follows.
     def trail_pivot(f):
         T, theta = pivot_pose(scn, trail, f)
         return lead_partner(T), thB, T, theta
 
-    # 3 both move: from the end of phase 2 to the start of phase 4.  The
-    #   leading assembly rolls along the new surface first, then the trailing
-    #   one rolls up to the transition.  Moving them one after the other
+    # 3, 4: from the end of phase 2 to the start of phase 5.  The leading
+    #   assembly rolls along the new surface first (3), then the trailing one
+    #   rolls up to the transition (4).  Moving them one after the other
     #   keeps the chain from folding up between the two surfaces.
     lead_across, _, trail_after, _ = lead_pivot(1.0)
     lead_waiting = trail_pivot(0.0)[0]
-    lead_leg = np.linalg.norm(lead_waiting - lead_across)
-    trail_leg = np.linalg.norm(trail_ready - trail_after)
-    split = lead_leg / max(lead_leg + trail_leg, 1e-12)
 
-    def both_move(f):
-        if f <= split and split > 0:
-            return _lerp(lead_across, lead_waiting, f / split), thB, trail_after, thA
-        g = (f - split) / (1 - split) if split < 1 else 1.0
-        return lead_waiting, thB, _lerp(trail_after, trail_ready, g), thA
+    def lead_rolls(f):
+        return _lerp(lead_across, lead_waiting, f), thB, trail_after, thA
 
-    # 5 depart: both roll to the standard end.  Parked: together at the
+    def trail_rolls(f):
+        return lead_waiting, thB, _lerp(trail_after, trail_ready, f), thA
+
+    # 6 depart: both roll to the standard end.  Parked: together at the
     #   cruise gap.  Following: the gap opens from `gap` to the cruise gap.
     lead_leaving = trail_pivot(1.0)[0]
     lead_end = rest_point(scn, B, END_DISTANCE + C, lead)
@@ -455,9 +481,11 @@ def plan_phases(scn, min_durations=None, gap=None):
 
     specs = [("approach", approach),
              (f"{scn.lead} pivots", lead_pivot),
-             ("both move", both_move),
+             (f"{scn.lead} rolls clear", lead_rolls),
+             (f"{trail_name} rolls up", trail_rolls),
              (f"{trail_name} pivots", trail_pivot),
              ("depart", depart)]
+    minimum = list(min_durations) if min_durations is not None else [0.0] * len(specs)
     return [Phase(name, _phase_duration(fn, minimum[i]), fn)
             for i, (name, fn) in enumerate(specs)]
 
@@ -481,8 +509,8 @@ def plan_pose(scn, phases, t):
     starts = phase_starts(phases)
     t = min(max(t, 0.0), starts[-1])
     i = _phase_index(starts, t)
-    f = min(max((t - starts[i]) / phases[i].duration, 0.0), 1.0)
-    lead_xy, lead_th, trail_xy, trail_th = phases[i].pose(f)
+    tau = min(max((t - starts[i]) / phases[i].duration, 0.0), 1.0)
+    lead_xy, lead_th, trail_xy, trail_th = phases[i].pose(ease(tau, RAMP_TIME / phases[i].duration))
     if scn.lead == "front":
         (p1, th1), (p2, th2) = (lead_xy, lead_th), (trail_xy, trail_th)
     else:

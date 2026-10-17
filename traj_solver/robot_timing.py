@@ -27,8 +27,8 @@ of Fritsch and Carlson: a weighted harmonic mean of the two step speeds when
 they have the same sign, and 0 where the joint stops or turns back.  So the
 cubic never overshoots a waypoint (every waypoint was checked by the
 solver), and a joint holding still between two waypoints stays still.  The
-first and last waypoints have speed 0: the joints start and end at rest, in
-the cruise posture.
+first and last waypoints have speed 0: the robot starts and ends at rest
+(every phase eases in and out of rest, scenarios.ease).
 
 Wheel speeds
 ------------
@@ -54,11 +54,6 @@ from trajectory import solve_trajectory
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.path.join(_SCRIPT_DIR, "timings")
-
-COLUMNS = (["time_s"]
-           + [f"{j}_rad" for j in JOINTS]
-           + [f"d{j}_rad_s" for j in JOINTS]
-           + [f"w_{w}_rad_s" for w in WHEELS])
 
 
 def joint_speeds(times, qs):
@@ -95,8 +90,9 @@ def _header(scn, traj):
 #                               back arm A, back arm B
 #
 # Between waypoints each joint follows the cubic through its position and speed
-# at both ends (cubic Hermite); wheel speeds change linearly.  The joints are at
-# rest at the first and last waypoint.
+# at both ends (cubic Hermite); wheel speeds change linearly.  The assemblies
+# come to rest at every phase boundary, and the whole robot is at rest at the
+# first and last waypoint.
 #
 # Values are in each motor's own convention (traj_solver/motor_calibration.py):
 #   joint motor position = offset + sign * ratio * joint angle
@@ -111,29 +107,38 @@ def _header(scn, traj):
 """
 
 
+def waypoints(traj):
+    """The columns of a solved transition's timing file, {column name: (N,)
+    array} in file order and in motor units."""
+    # Joint angles in display convention, unwrapped so ±π crossings stay continuous.
+    angles = np.unwrap(q_display(traj.Q), axis=0)
+    rates = joint_speeds(traj.times, angles)
+    _, wheel = wheel_speeds(traj.scenario, traj.phases, traj.times)
+
+    columns = {"time_s": traj.times}
+    for j, (name, m) in enumerate(JOINTS.items()):
+        columns[f"{name}_rad"] = m.position(angles[:, j])
+    for j, (name, m) in enumerate(JOINTS.items()):
+        columns[f"d{name}_rad_s"] = m.speed(rates[:, j])
+    for j, (name, m) in enumerate(WHEELS.items()):
+        columns[f"w_{name}_rad_s"] = m.speed(wheel[:, j])
+    return columns
+
+
 def export(name, out_dir=OUT_DIR):
     """Solve one transition (or load it from the cache) and write its timing
     file; returns the output path."""
     scn = SCENARIOS[name]
     traj = solve_trajectory(scn)
-
-    # Joint angles in display convention, unwrapped so ±π crossings stay continuous.
-    angles = np.unwrap(q_display(traj.Q), axis=0)
-    rates = joint_speeds(traj.times, angles)
-    _, wheel = wheel_speeds(scn, traj.phases, traj.times)
-
-    columns = [traj.times]
-    columns += [m.position(angles[:, j]) for j, m in enumerate(JOINTS.values())]
-    columns += [m.speed(rates[:, j]) for j, m in enumerate(JOINTS.values())]
-    columns += [m.speed(wheel[:, j]) for j, m in enumerate(WHEELS.values())]
+    columns = waypoints(traj)
 
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, f"{name}.csv")
     with open(path, "w", newline="") as fh:
         fh.write(_header(scn, traj))
         writer = csv.writer(fh)
-        writer.writerow(COLUMNS)
-        for row in zip(*columns):
+        writer.writerow(list(columns))
+        for row in zip(*columns.values()):
             writer.writerow([f"{v:.6f}" for v in row])
     print(f"{name}: {traj.times[-1]:.1f} s, {len(traj)} waypoints at {traj.rate:g} Hz → {path}")
     return path
