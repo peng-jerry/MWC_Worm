@@ -10,7 +10,10 @@ time, with the phase boundaries marked:
   1. wheel motor speed of all four wheels — relative to the wheel's
      assembly, as in the timing files (rad/s, CCW positive;
      scenarios.wheel_speeds) — with the rolling-speed limit
-     SLIDE_SPEED / wheel radius
+     SLIDE_SPEED / wheel radius.  A wheel with no motor (the arm B wheels,
+     motor_calibration.WHEELS) is shown at 0 while it is in the air:
+     wheel_speeds ramps an airborne wheel to its landing speed, which only a
+     driven wheel can do
   2. joint angles q1–q4 (display convention) with the soft and hard joint
      limits from constraints.py
   3. joint speeds (°/s) with the joint speed limit
@@ -30,7 +33,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from trajectory import solve_trajectory
 from constraints import JOINT_HARD_LIMIT_DEG, JOINT_SOFT_LIMIT_DEG
 from kinematics import q_display
-from scenarios import SCENARIOS, wheel_speeds
+from motor_calibration import WHEELS as WHEEL_MOTORS
+from scenarios import SCENARIOS, wheel_speeds, wheels_touching
 from timing import MAX_JOINT_SPEED, SLIDE_SPEED
 
 OUT_NAMES = {"floor_to_wall": "wheel_omega_ftw.png", "wall_to_ceiling": "wheel_omega_wtc.png",
@@ -42,7 +46,9 @@ def plot(name, out_dir):
     traj = solve_trajectory(scn)
     t = traj.times
     _, spin = wheel_speeds(scn, traj.phases, t)
-    qs = np.degrees(np.unwrap(np.array([q_display(q) for q in traj.Q]), axis=0))
+    free = np.array([m is None for m in WHEEL_MOTORS.values()])     # same order as scenarios.WHEELS
+    spin = np.where(free & ~wheels_touching(scn, traj.phases, t), 0.0, spin)
+    qs =np.degrees(np.unwrap(np.array([q_display(q) for q in traj.Q]), axis=0))
     dqs = np.diff(qs, axis=0) / np.diff(t)[:, None]          # °/s over each step
     t_mid = 0.5 * (t[1:] + t[:-1])
 
@@ -54,6 +60,8 @@ def plot(name, out_dir):
     styles = [("Front arm A", "#1f77b4", "-"), ("Front arm B", "#1f77b4", "--"),
               ("Back arm A", "#d62728", "-"), ("Back arm B", "#d62728", "--")]
     for j, (label, color, ls) in enumerate(styles):
+        if free[j]:
+            label += " (free; 0 in the air)"
         ax1.plot(t, spin[:, j], label=label, color=color, lw=1.8, linestyle=ls)
     omega_lim = SLIDE_SPEED / scn.wg.wheel_r
     for sgn in (1, -1):

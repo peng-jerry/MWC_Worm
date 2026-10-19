@@ -54,7 +54,8 @@ Positions come from geometry only:
     surfaces while it turns (pivot_pose)
   * pivoting at an outside corner or edge: the assembly's trailing wheel rolls
     around the solid's outline — round the corner, along the end face if
-    the solid has a thickness, round the next corner (pivot_pose)
+    the solid has a thickness, round the next corner — while the assembly
+    turns at an even rate (pivot_pose)
 so changing the link lengths, wheel and arm geometry, or where the surfaces
 are, changes the motion automatically.  The plan is checked as it is sampled:
 the chain joints stay within the chain's reach (no farther apart than its
@@ -291,9 +292,12 @@ def pivot_pose(scn, side, f):
 
     Outside corner or edge: the trailing wheel (the last to leave the
     approach surface) rolls around the solid's outline (_outline): its centre
-    stays one wheel radius from the solid, in the assembly's "up" direction,
-    as if the assembly stood on a surface that turns with it.  f runs evenly
-    along that path.
+    stays one wheel radius from the solid, f running evenly along that path,
+    while the orientation turns at an even rate.  Round a single corner the
+    two agree: the assembly stands square on a surface that turns with it.
+    Where the solid has an end face, the wheel rolls along it while the
+    assembly keeps turning, instead of the turn pausing there; the assembly
+    leans a little off square near the corners (under 4° at the thin edge).
     """
     thA = surface_orientation(scn.approach)
     r = scn.wg.wheel_r
@@ -315,11 +319,11 @@ def pivot_pose(scn, side, f):
         s -= length
     if piece[0] == "turn":
         _, corner, th0, th1 = piece
-        theta = th0 + g * (th1 - th0)
-        centre = corner + r * _up(theta)
+        centre = corner + r * _up(th0 + g * (th1 - th0))
     else:
-        _, start, end, theta = piece
-        centre = start + g * (end - start) + r * _up(theta)
+        _, start, end, th = piece
+        centre = start + g * (end - start) + r * _up(th)
+    theta = thA + f * scn.turn
     return centre - wheel_offsets(theta, scn.wg, side)[trailing], theta
 
 
@@ -799,6 +803,31 @@ def wheel_speeds(scn, phases, times, h=1e-4, tol=FEASIBILITY_TOL):
                        wheel is already turning at the right speed when it
                        lands
     """
+    rolling, turn = _contact_rolling(scn, phases, times, h, tol)
+    motor = rolling - turn
+    for j in range(4):
+        air = np.isnan(motor[:, j])
+        if air.all():
+            motor[:, j] = 0.0
+        elif air.any():
+            motor[air, j] = np.interp(times[air], times[~air], motor[~air, j])
+    return motor + turn, motor
+
+
+def wheels_touching(scn, phases, times, h=1e-4, tol=FEASIBILITY_TOL):
+    """
+    Which wheels touch the solid at each time, (N, 4) bool in the order of
+    WHEELS: where wheel_speeds takes a wheel's speed from a contact, rather
+    than ramping it through the air.
+    """
+    return ~np.isnan(_contact_rolling(scn, phases, times, h, tol)[0])
+
+
+def _contact_rolling(scn, phases, times, h, tol):
+    """
+    Each wheel's rolling speed from its contacts (wheel_speeds), NaN where it
+    touches nothing, and each wheel's assembly turn rate; both (N, 4) rad/s.
+    """
     r = scn.wg.wheel_r
     segments = scn.env.face_segments()
     end = phase_starts(phases)[-1]
@@ -832,15 +861,7 @@ def wheel_speeds(scn, phases, times, h=1e-4, tol=FEASIBILITY_TOL):
                     rates.append(np.array([-n[1], n[0]]) @ v[j] / r)
             if rates:
                 rolling[k, j] = np.mean(rates)
-
-    motor = rolling - turn
-    for j in range(4):
-        air = np.isnan(motor[:, j])
-        if air.all():
-            motor[:, j] = 0.0
-        elif air.any():
-            motor[air, j] = np.interp(times[air], times[~air], motor[~air, j])
-    return motor + turn, motor
+    return rolling, turn
 
 
 # ── The four transitions ──────────────────────────────────────────────────────

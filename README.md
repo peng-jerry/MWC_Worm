@@ -85,7 +85,7 @@ All four transitions follow the same requirements; nothing is tuned per transiti
 
 | | Inside corner (floor → wall, wall → ceiling) | Exterior (outside corner, thin edge) |
 |---|---|---|
-| Pivot | the assembly stays pressed into both surfaces, turning at an even rate | the trailing wheel rolls around the solid's outline (round the corner, along the end face if there is one, round the next corner) |
+| Pivot | the assembly stays pressed into both surfaces, turning at an even rate | the trailing wheel rolls around the solid's outline (round the corner, along the end face if there is one, round the next corner) while the assembly turns at an even rate, so the turn never pauses on the end face |
 | Partner during a pivot | **parks** | **follows** at the follow gap, never rolling backwards: where keeping the gap exactly would make it back up, it eases to a stop and waits, and the gap opens a little instead |
 | Gap in approach / depart | stays 0.80 m | closes from 0.80 m to the follow gap / opens back to 0.80 m |
 | Phases 3 and 4 | **one after the other** (leading first), so the chain does not fold up into the corner | **one phase, "both roll"**: both roll at once, so the chain does not stretch over the edge |
@@ -100,7 +100,7 @@ The **follow gap** is chosen per exterior transition (`scenarios.follow_gap`): g
 | `floor_to_wall` | floor → interior wall | −90° | front | partner parks | 37.3 s | 90.0° |
 | `wall_to_ceiling` | interior wall → ceiling | −90° | front | partner parks | 37.3 s | 90.0° |
 | `outside` | top of a block → its exterior wall | +90° | front | 0.635 m | 30.3 s | 87.1° |
-| `thin_edge` | top of a 3.4 mm plate → its underside | −180° | back | 0.435 m (0.434 – 0.472) | 45.3 s | 102.8° |
+| `thin_edge` | top of a 3.4 mm plate → its underside | −180° | back | 0.435 m (0.435 – 0.471) | 44.0 s | 102.8° |
 
 Durations and peaks are from the solve at 6 waypoints/s; `python animate_transition.py <name> --no-render` prints the current phase timing. The thin edge's half turn needs joints past the 90° soft limit (but within the 110° hard limit).
 
@@ -180,7 +180,7 @@ Output files (all written relative to `traj_solver/`):
 | File | Contents |
 |------|----------|
 | `gifs/{transition}.gif` | Animation of the solved transition (`.mp4` instead if ffmpeg is available) |
-| `wheel_omega/wheel_omega_{ftw,wtc,out,te}.png` | Wheel motor speed, joint angles and joint speeds against time |
+| `wheel_omega/wheel_omega_{ftw,wtc,out,te}.png` | Wheel motor speed (the free arm B wheels at 0 while in the air), joint angles and joint speeds against time |
 | `keyframes/keyframes_{transition}.png` | The pose at the start and at the end of every phase |
 | `robot_configs/robot_config_{transition}.png` | One frame (end of phase 3) — `main.py` |
 | `timings/{transition}.csv` | Waypoints for the robot: joint positions and speeds, wheel speeds (`Motor/playback.py`) |
