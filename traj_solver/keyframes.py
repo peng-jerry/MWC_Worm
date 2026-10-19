@@ -4,9 +4,10 @@ keyframes.py — show each transition at its phase boundaries.
 Usage:
     python keyframes.py [scenario | all]     default: all
 
-For each transition, draws seven panels taken from the solved trajectory: the
-start, then the end of each of the six phases (approach, pivot, roll clear,
-roll up, pivot, depart — the last panel is the finish).  Phase durations are whole multiples of
+For each transition, draws a panel taken from the solved trajectory for the
+start, then one for the end of each phase (approach, pivot, roll clear, roll
+up, pivot, depart; roll clear and roll up are one "both roll" phase at an
+outside corner or edge — the last panel is the finish).  Phase durations are whole multiples of
 timing.SCHEDULE_STEP, so at 3 or 6 fps every boundary is an actual frame — the
 panels show exactly what the animation and robot_timing.py contain.
 

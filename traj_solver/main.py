@@ -1,5 +1,5 @@
 """
-main.py — snapshot of one transition, between its two rolling phases.
+main.py — snapshot of one transition, once the leading assembly has rolled clear.
 
 Usage:
     python main.py [scenario]
@@ -7,7 +7,9 @@ Usage:
 
 Solves the transition exactly as animate_transition.py does and draws the
 frame at the end of phase 3, when the leading assembly has rolled clear of
-the transition and the trailing one has not yet rolled up to it.  Joint angles are printed in the calf-up display convention (q1/q4: 0° =
+the transition.  At an inside corner the trailing one has not yet rolled up
+to it; at an outside corner or edge, where both roll together, it has.
+Joint angles are printed in the calf-up display convention (q1/q4: 0° =
 link straight up from the calf).
 
 Writes robot_configs/robot_config_<scenario>.png.

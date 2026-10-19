@@ -24,9 +24,12 @@ robot_timing.py writes the timing files in each motor's own convention:
           directly.  BEAR actuators report their output shaft (after the
           built-in 20:1), so this is only gearing beyond the actuator.
 
-Every entry is a pass-through (offset 0, sign +1, ratio 1) until measured on
-the robot.  After changing this file, run robot_timing.py again (the solve
-itself is cached and does not depend on it).
+The ratios are known: each chain joint is driven through a 30:1 worm gear,
+and each arm A wheel directly.  Arm B wheels have no motor (they spin
+freely), so they are None and the timing files carry no column for them.
+Offsets and signs are pass-throughs (0, +1) until measured on the robot.
+After changing this file, run robot_timing.py again (the solve itself is
+cached and does not depend on it).
 """
 
 from dataclasses import dataclass
@@ -55,18 +58,21 @@ class Motor:
         return speed / (self.sign * self.ratio)
 
 
+JOINT_WORM_RATIO = 30.0     # motor turns per joint turn
+
 # The chain joints, q1 (front) … q4 (back).
 JOINTS = {
-    "q1": Motor(),
-    "q2": Motor(),
-    "q3": Motor(),
-    "q4": Motor(),
+    "q1": Motor(ratio=JOINT_WORM_RATIO),
+    "q2": Motor(ratio=JOINT_WORM_RATIO),
+    "q3": Motor(ratio=JOINT_WORM_RATIO),
+    "q4": Motor(ratio=JOINT_WORM_RATIO),
 }
 
-# The wheels: arm A and arm B of the front and back assemblies.
+# The wheels, in the order of scenarios.WHEELS: arm A and arm B of the front
+# and back assemblies.  None = no motor.
 WHEELS = {
     "front_a": Motor(),
-    "front_b": Motor(),
+    "front_b": None,
     "back_a":  Motor(),
-    "back_b":  Motor(),
+    "back_b":  None,
 }

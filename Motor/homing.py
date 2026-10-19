@@ -7,14 +7,18 @@ Usage:
     python homing.py outside
     python homing.py thin_edge
 
-Uses POSITION mode.  Each motor is interpolated independently at a safe speed
-(capped at HOMING_VEL_MAX rad/s) so the slowest joint sets the overall time.
+Uses POSITION mode.  Each motor is interpolated independently, no joint
+faster than HOMING_JOINT_SPEED, so the joint with the furthest to go sets the
+overall time.
+
+The CSV is in each motor's own units (motor positions, after the 30:1 worm);
+speeds, tolerances and printed angles here are at the joint, converted with
+the same table robot_timing.py uses (traj_solver/motor_calibration.py).
 
 BEFORE RUNNING:
-  1. The CSV is already in each motor's own units.  Calibrate in
-     traj_solver/motor_calibration.py — offset = the motor's reading with the
-     joint at 0 (link straight up from the calf for q1/q4, straight for
-     q2/q3), plus direction sign and gear ratio — then re-run
+  1. Calibrate in traj_solver/motor_calibration.py — offset = the motor's
+     reading with the joint at 0 (link straight up from the calf for q1/q4,
+     straight for q2/q3), plus direction sign — then re-run
      traj_solver/robot_timing.py.
      Read the offsets with:  python -c "from pybear import Manager; b=Manager.BEAR('/dev/ttyUSB0',8000000); print(b.get_present_position(1,2,3,4))"
   2. Confirm MOTOR_IDS matches your wiring.
@@ -35,6 +39,12 @@ _PYBEAR_DIR = os.path.join(
 sys.path.insert(0, _PYBEAR_DIR)
 from pybear import Manager
 
+# ── Motor calibration (shared with traj_solver/robot_timing.py) ───────────────
+_TRAJ_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "traj_solver")
+sys.path.insert(0, _TRAJ_DIR)
+from motor_calibration import JOINTS
+CAL = [JOINTS[f"q{j}"] for j in range(1, 5)]      # q1 → q4
+
 # ── Hardware config ───────────────────────────────────────────────────────────
 PORT       = "/dev/ttyUSB0"   # change to e.g. "COM9" on Windows
 BAUDRATE   = 8_000_000
@@ -43,7 +53,7 @@ BAUDRATE   = 8_000_000
 MOTOR_IDS  = [1, 2, 3, 4]
 
 # ── Motion limits ─────────────────────────────────────────────────────────────
-HOMING_VEL_MAX = 0.19   # rad/s  (half of 21.6 °/s = 0.377 rad/s, conservative)
+HOMING_JOINT_SPEED = math.radians(10.8)   # rad/s at the joint (half the 21.6 °/s limit)
 IQ_MAX         = 1.5    # A — torque cap during homing
 STEP_DT        = 0.05   # s — command update interval
 
@@ -59,7 +69,7 @@ I_GAIN_ID  = 0.02
 D_GAIN_ID  = 0.0
 
 # Arrival tolerance
-ARRIVAL_TOL = math.radians(2.0)   # rad — 2°
+ARRIVAL_TOL = math.radians(2.0)   # rad at the joint — 2°
 
 # ── Timing CSV directory ──────────────────────────────────────────────────────
 _TIMINGS_DIR = os.path.join(
@@ -88,15 +98,20 @@ def read_positions(bear, ids: list[int]) -> list[float]:
     return [bear.get_present_position(mid)[0][0][0] for mid in ids]
 
 
+def joint_degrees(raw: list[float]) -> str:
+    """Motor positions as joint angles, e.g. 'q1=+12.3°  q2=…'."""
+    return "  ".join(f"q{j + 1}={math.degrees(c.angle(r)):+.1f}°" for j, (c, r) in enumerate(zip(CAL, raw)))
+
+
 def interpolate(start: list[float], end: list[float], t: float) -> list[float]:
     """Linear interpolation; t in [0, 1]."""
     return [s + (e - s) * t for s, e in zip(start, end)]
 
 
 def homing_duration(start_raw: list[float], end_raw: list[float]) -> float:
-    """Time needed so the fastest joint stays within HOMING_VEL_MAX."""
-    max_delta = max(abs(e - s) for s, e in zip(start_raw, end_raw))
-    return max(max_delta / HOMING_VEL_MAX, STEP_DT)
+    """Time needed so no joint moves faster than HOMING_JOINT_SPEED."""
+    max_delta = max(abs(c.angle(e) - c.angle(s)) for c, s, e in zip(CAL, start_raw, end_raw))
+    return max(max_delta / HOMING_JOINT_SPEED, STEP_DT)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -109,10 +124,7 @@ scenario   = sys.argv[1]
 target_raw = load_start_pose(scenario)
 
 print(f"\nScenario : {scenario}")
-print(f"Target   : q1={math.degrees(target_raw[0]):+.1f}°  "
-      f"q2={math.degrees(target_raw[1]):+.1f}°  "
-      f"q3={math.degrees(target_raw[2]):+.1f}°  "
-      f"q4={math.degrees(target_raw[3]):+.1f}°  (motor positions)")
+print(f"Target   : {joint_degrees(target_raw)}  (joint angles)")
 
 # Connect
 bear = Manager.BEAR(port=PORT, baudrate=BAUDRATE)
@@ -143,10 +155,15 @@ for mid in MOTOR_IDS:
 
 # Read current positions
 current_raw = read_positions(bear, MOTOR_IDS)
-print(f"\nCurrent  : q1={math.degrees(current_raw[0]):+.1f}°  "
-      f"q2={math.degrees(current_raw[1]):+.1f}°  "
-      f"q3={math.degrees(current_raw[2]):+.1f}°  "
-      f"q4={math.degrees(current_raw[3]):+.1f}°")
+print(f"\nCurrent  : {joint_degrees(current_raw)}")
+
+# The motors refuse positions outside their position limits; check the target first.
+for j, (mid, goal) in enumerate(zip(MOTOR_IDS, target_raw)):
+    lo = bear.get_limit_position_min(mid)[0][0][0]
+    hi = bear.get_limit_position_max(mid)[0][0][0]
+    if not lo <= goal <= hi:
+        print(f"WARNING: q{j + 1} target {goal:+.2f} rad is outside motor {mid}'s position limits "
+              f"[{lo:+.2f}, {hi:+.2f}] rad (motor units, after the worm)")
 
 duration = homing_duration(current_raw, target_raw)
 n_steps  = max(int(duration / STEP_DT), 1)
@@ -177,12 +194,9 @@ for step in range(1, n_steps + 1):
 # Verify arrival
 time.sleep(0.3)
 final_raw = read_positions(bear, MOTOR_IDS)
-errors    = [abs(f - t) for f, t in zip(final_raw, target_raw)]
-print(f"\nArrival errors: "
-      f"q1={math.degrees(errors[0]):.2f}°  "
-      f"q2={math.degrees(errors[1]):.2f}°  "
-      f"q3={math.degrees(errors[2]):.2f}°  "
-      f"q4={math.degrees(errors[3]):.2f}°")
+errors    = [abs(c.angle(f) - c.angle(t)) for c, f, t in zip(CAL, final_raw, target_raw)]
+print("\nArrival errors (joint): " + "  ".join(f"q{j + 1}={math.degrees(e):.2f}°"
+                                              for j, e in enumerate(errors)))
 
 if all(e < ARRIVAL_TOL for e in errors):
     print("Homing complete — all joints within tolerance.")

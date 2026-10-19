@@ -11,8 +11,9 @@ the calibration used and how to interpolate), then one row per waypoint:
   time_s                     seconds from the start of the transition
   q1_rad … q4_rad            joint motor positions (rad)
   dq1_rad_s … dq4_rad_s      joint motor speeds at the waypoint (rad/s)
-  w_front_a_rad_s,           wheel motor speeds (rad/s): front arm A, front arm B,
-  w_front_b_rad_s, …         back arm A, back arm B
+  w_front_a_rad_s,           wheel motor speeds (rad/s), one per wheel with a
+  w_back_a_rad_s             motor (motor_calibration.WHEELS): front and back
+                             arm A.  Arm B wheels spin freely.
 
 Every value is in its motor's own convention (motor_calibration.py).  With
 the calibration table at its pass-through defaults that is the display
@@ -50,32 +51,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from kinematics import q_display
 from motor_calibration import JOINTS, WHEELS
 from scenarios import SCENARIOS, wheel_speeds
-from trajectory import solve_trajectory
+from trajectory import solve_trajectory, joint_speeds    # joint_speeds: the monotone rule above
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.path.join(_SCRIPT_DIR, "timings")
-
-
-def joint_speeds(times, qs):
-    """
-    Speed (rad/s) of each joint at each waypoint, for angles qs (N, J) at
-    times (N,): the monotone rule of the module docstring, 0 at both ends.
-    """
-    h = np.diff(times)[:, None]
-    step = np.diff(qs, axis=0) / h                   # speed over each step
-    s0, s1, h0, h1 = step[:-1], step[1:], h[:-1], h[1:]
-    w0, w1 = 2 * h1 + h0, h1 + 2 * h0                # Fritsch–Butland weights
-    v = np.zeros_like(qs)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        v[1:-1] = np.where(s0 * s1 > 0, (w0 + w1) / (w0 / s0 + w1 / s1), 0.0)
-    return v
 
 
 def _header(scn, traj):
     """The '#' lines at the top of a timing file."""
     joint_cal = "\n".join(f"#   {name:8s} {m.offset:+.6f}  {m.sign:+d}  {m.ratio:g}"
                           for name, m in JOINTS.items())
-    wheel_cal = "\n".join(f"#   {name:8s}     -      {m.sign:+d}  {m.ratio:g}"
+    wheel_cal = "\n".join(f"#   {name:8s}     -      {m.sign:+d}  {m.ratio:g}" if m is not None
+                          else f"#   {name:8s} no motor (spins freely)"
                           for name, m in WHEELS.items())
     return f"""\
 # {scn.label}: timing file for Motor/playback.py
@@ -86,8 +73,7 @@ def _header(scn, traj):
 #   time_s                      seconds from the start of the transition
 #   q1_rad .. q4_rad            joint motor positions (rad)
 #   dq1_rad_s .. dq4_rad_s      joint motor speeds at the waypoint (rad/s)
-#   w_front_a_rad_s ..          wheel motor speeds (rad/s): front arm A, front arm B,
-#                               back arm A, back arm B
+#   w_<wheel>_rad_s             wheel motor speeds (rad/s), one per wheel with a motor
 #
 # Between waypoints each joint follows the cubic through its position and speed
 # at both ends (cubic Hermite); wheel speeds change linearly.  The assemblies
@@ -120,8 +106,9 @@ def waypoints(traj):
         columns[f"{name}_rad"] = m.position(angles[:, j])
     for j, (name, m) in enumerate(JOINTS.items()):
         columns[f"d{name}_rad_s"] = m.speed(rates[:, j])
-    for j, (name, m) in enumerate(WHEELS.items()):
-        columns[f"w_{name}_rad_s"] = m.speed(wheel[:, j])
+    for j, (name, m) in enumerate(WHEELS.items()):       # same order as scenarios.WHEELS
+        if m is not None:
+            columns[f"w_{name}_rad_s"] = m.speed(wheel[:, j])
     return columns
 
 

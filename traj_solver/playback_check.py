@@ -41,7 +41,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from constraints import CLEARANCE_GROUPS, HARD_CLEARANCE, SOFT_CLEARANCE, evaluate
 from motor_calibration import JOINTS, WHEELS
 from robot_timing import OUT_DIR, read_timing, waypoints
-from scenarios import SCENARIOS, WHEELS as WHEEL_NAMES, l1, l2, l3, plan_pose
+from scenarios import SCENARIOS, l1, l2, l3, plan_pose
 from timing import MAX_JOINT_SPEED
 from trajectory import solve_trajectory
 
@@ -105,7 +105,8 @@ def check(traj, cols):
     # Back to the solver's conventions: display angles (rad) and side-view speeds.
     q = np.stack([m.angle(cols[f"{n}_rad"]) for n, m in JOINTS.items()], axis=1)
     v = np.stack([m.rate(cols[f"d{n}_rad_s"]) for n, m in JOINTS.items()], axis=1)
-    w = np.stack([m.rate(cols[f"w_{n}_rad_s"]) for n, m in WHEELS.items()], axis=1)
+    driven = {n: m for n, m in WHEELS.items() if m is not None}
+    w = np.stack([m.rate(cols[f"w_{n}_rad_s"]) for n, m in driven.items()], axis=1)
 
     def phase(t):
         return traj.phases[traj.phase_at(t)].name
@@ -157,7 +158,7 @@ def check(traj, cols):
         "speed": (abs(vel[i_vel, j_vel]), j_vel, tt[i_vel], phase(tt[i_vel]), step_speed),
         "accel": (abs(acc[i_acc, j_acc]), j_acc, tt[i_acc], phase(tt[i_acc])),
         "wheel_speed": np.abs(w).max(),
-        "wheel_accel": (w_acc[k_wacc, j_wacc], j_wacc, times[k_wacc], phase(times[k_wacc])),
+        "wheel_accel": (w_acc[k_wacc, j_wacc], list(driven)[j_wacc], times[k_wacc], phase(times[k_wacc])),
     }
 
 
@@ -185,9 +186,9 @@ def report(name, traj, r, source):
           f"waypoint steps {np.degrees(step):.1f}°/s, motor {np.degrees(MAX_JOINT_SPEED):.1f}°/s{over}")
     acc, j, t, ph = r["accel"]
     print(f"  joint acceleration  max {np.degrees(acc):.0f}°/s² on q{j + 1} (t = {t:.2f} s, {ph})")
-    wa, j, t, ph = r["wheel_accel"]
+    wa, wheel, t, ph = r["wheel_accel"]
     print(f"  wheel motor         max {r['wheel_speed']:.2f} rad/s;  acceleration max {wa:.1f} rad/s² "
-          f"({wa * traj.scenario.wg.wheel_r:.2f} m/s² at the rim) on {WHEEL_NAMES[j]} (t = {t:.2f} s, {ph})")
+          f"({wa * traj.scenario.wg.wheel_r:.2f} m/s² at the rim) on {wheel} (t = {t:.2f} s, {ph})")
 
 
 def main():

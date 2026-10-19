@@ -22,7 +22,9 @@ waypoint's speed, so the motion is smooth across waypoints.
 traj_solver/playback_check.py simulates this same interpolation.
 
 The CSV is already in each motor's own units (calibration lives in
-traj_solver/motor_calibration.py), so positions are sent as they are.
+traj_solver/motor_calibration.py: motor positions after each joint's 30:1
+worm), so positions are sent as they are.  Tolerances and printed angles here
+are at the joint, converted with the same table.
 Wheel speed columns are not used yet.
 """
 
@@ -39,6 +41,12 @@ _PYBEAR_DIR = os.path.join(
 )
 sys.path.insert(0, _PYBEAR_DIR)
 from pybear import Manager
+
+# ── Motor calibration (shared with traj_solver/robot_timing.py) ───────────────
+_TRAJ_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "traj_solver")
+sys.path.insert(0, _TRAJ_DIR)
+from motor_calibration import JOINTS
+CAL = [JOINTS[f"q{j}"] for j in range(1, 5)]      # q1 → q4
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Config — must match homing.py
@@ -66,7 +74,7 @@ I_GAIN_ID  = 0.02
 D_GAIN_ID  = 0.0
 IQ_MAX     = 1.5      # A — torque cap during playback
 
-# Arrival tolerance before playback starts (rad)
+# How far each joint may be from the start pose before playback asks (rad at the joint)
 START_TOL  = math.radians(5.0)
 
 # ── Output directory ──────────────────────────────────────────────────────────
@@ -141,9 +149,9 @@ print(f"Command  : every {1000/INTERP_HZ:.0f}ms  (cubic Hermite between waypoint
 # Start pose (motor units)
 target_raw = frames[0]
 
-print(f"\nStart pose:")
+print(f"\nStart pose (joint angles):")
 for i, q in enumerate(target_raw):
-    print(f"  q{i+1} = {math.degrees(q):+.1f}°  (motor {MOTOR_IDS[i]})")
+    print(f"  q{i+1} = {math.degrees(CAL[i].angle(q)):+.1f}°  (motor {MOTOR_IDS[i]})")
 
 # Connect
 print("\nConnecting...")
@@ -169,27 +177,43 @@ for mid in MOTOR_IDS:
     bear.set_mode((mid, 2))           # position mode
     bear.set_limit_i_max((mid, IQ_MAX))
 
-# Enable and check we're near the start pose
-print("\nEnabling motors...")
-for mid, pos in zip(MOTOR_IDS, target_raw):
-    bear.set_goal_position((mid, pos))   # prime goal before enabling
-    bear.set_torque_enable((mid, 1))
+# The motors refuse positions outside their position limits; check the whole
+# file (the curves between waypoints never pass beyond the waypoints).
+outside = False
+for j, mid in enumerate(MOTOR_IDS):
+    lo = read1(bear.get_limit_position_min, mid)[0]
+    hi = read1(bear.get_limit_position_max, mid)[0]
+    need_lo = min(f[j] for f in frames)
+    need_hi = max(f[j] for f in frames)
+    if need_lo < lo or need_hi > hi:
+        outside = True
+        print(f"  WARNING: q{j+1} needs motor {mid} from {need_lo:+.2f} to {need_hi:+.2f} rad, "
+              f"outside its position limits [{lo:+.2f}, {hi:+.2f}] rad")
+if outside:
+    input("Press Enter to continue anyway, Ctrl-C to abort: ")
 
+# Check we're near the start pose before enabling: an enabled motor drives
+# straight to its goal.
 current_raw = [read1(bear.get_present_position, mid)[0] for mid in MOTOR_IDS]
-errors = [abs(c - t) for c, t in zip(current_raw, target_raw)]
+errors = [abs(c.angle(cur) - c.angle(t)) for c, cur, t in zip(CAL, current_raw, target_raw)]
 max_err = max(errors)
 
-print(f"\nDistance from start pose:")
+print(f"\nDistance from start pose (joint):")
 for i, e in enumerate(errors):
     flag = "  ← WARNING" if e > START_TOL else ""
     print(f"  q{i+1}: {math.degrees(e):.1f}°{flag}")
 
 if max_err > START_TOL:
-    print(f"\nWARNING: joints are more than {math.degrees(START_TOL):.0f}° from the start pose.")
-    print("Run homing.py first, or press Enter to continue anyway.")
+    print(f"\nWARNING: joints are more than {math.degrees(START_TOL):.0f}° from the start pose;")
+    print("enabling will drive them straight there.  Run homing.py first, or press Enter to continue anyway.")
     input("Press Enter to continue, Ctrl-C to abort: ")
 else:
     print("  All joints within tolerance.")
+
+print("\nEnabling motors...")
+for mid, pos in zip(MOTOR_IDS, target_raw):
+    bear.set_goal_position((mid, pos))   # prime goal before enabling
+    bear.set_torque_enable((mid, 1))
 
 # Countdown
 print("\nStarting playback in:")

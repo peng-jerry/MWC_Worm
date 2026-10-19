@@ -43,8 +43,8 @@ _DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(_DIR, ".cache")
 
 # A phase is slowed down when a joint exceeds PLAN_JOINT_SPEED by more than
-# RETIME_TOLERANCE in it; the trajectory is then solved again, at most
-# MAX_RETIMES times.
+# RETIME_TOLERANCE in it, as the robot plays it (_phase_peak_speeds); the
+# trajectory is then solved again, at most MAX_RETIMES times.
 RETIME_TOLERANCE = 0.005
 MAX_RETIMES = 5
 
@@ -60,7 +60,7 @@ class Trajectory:
     infos    per-frame diagnostics (trajectory_ik.solve_trajectory_dp)
     phases   the phases with their final durations
     retimes  how many times phases were slowed down for the joint speed limit
-    gap      gap (m) the partner keeps while following a pivot, or None when
+    gap      gap (m) the partner aims to keep while following a pivot, or None when
              it parks (scenarios.follow_gap)
     key      the cache key: identifies the code and parameters that made it
     cached   True when it was loaded from the cache instead of solved
@@ -100,11 +100,39 @@ class Trajectory:
         return iter(zip(self.Q, self.infos, self.poses))
 
 
+def joint_speeds(times, qs):
+    """
+    Speed (rad/s) of each joint at each waypoint, for angles qs (N, J) at
+    times (N,), as the robot plays them (robot_timing.py): the monotone
+    ("PCHIP") rule of Fritsch and Carlson — a weighted harmonic mean of the
+    step speeds on both sides when they have the same sign, 0 where the joint
+    stops or turns back — and 0 at both ends.
+    """
+    h = np.diff(times)[:, None]
+    step = np.diff(qs, axis=0) / h                   # speed over each step
+    s0, s1, h0, h1 = step[:-1], step[1:], h[:-1], h[1:]
+    w0, w1 = 2 * h1 + h0, h1 + 2 * h0                # Fritsch–Butland weights
+    v = np.zeros_like(qs)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        v[1:-1] = np.where(s0 * s1 > 0, (w0 + w1) / (w0 / s0 + w1 / s1), 0.0)
+    return v
+
+
 def _phase_peak_speeds(times, Q, phases):
-    """Fastest joint speed (rad/s) within each phase.  Each step between two
-    frames counts toward the phase that contains its midpoint."""
+    """
+    Fastest joint speed (rad/s) within each phase, on the curve the robot
+    plays: between waypoints, the cubic through both ends' positions and
+    joint_speeds (cubic Hermite, Motor/playback.py).  Near a speed peak it
+    is faster than the step between the waypoints.  Each segment between two
+    waypoints counts toward the phase that contains its midpoint.
+    """
     D = np.unwrap(np.array([q_display(q) for q in Q]), axis=0)
-    speed = np.abs(np.diff(D, axis=0)).max(axis=1) / np.diff(times)
+    V = joint_speeds(times, D)
+    a = np.linspace(0.0, 1.0, 33)[:, None, None]     # through each segment, finer than 100 Hz
+    # Time derivative of the cubic Hermite (basis derivatives h00', h10', h11').
+    speed = ((6 * a * a - 6 * a) * (D[:-1] - D[1:]) / np.diff(times)[:, None]
+             + (3 * a * a - 4 * a + 1) * V[:-1] + (3 * a * a - 2 * a) * V[1:])
+    speed = np.abs(speed).max(axis=(0, 2))
     mid = 0.5 * (times[1:] + times[:-1])
     starts = phase_starts(phases)
     return np.array([speed[(mid > starts[i]) & (mid < starts[i + 1])].max(initial=0.0)
@@ -223,8 +251,9 @@ def solve_trajectory(scn, rate=SAMPLE_RATE):
     At an outside corner or edge the follow gap is chosen first
     (scenarios.follow_gap).  The phases are then timed from the wheel and
     pivot speeds alone (scenarios.plan_phases).  If the solved joints must
-    move faster than timing.PLAN_JOINT_SPEED in some phase, that phase is
-    lengthened in proportion and the trajectory is solved again.
+    move faster than timing.PLAN_JOINT_SPEED in some phase — as the robot
+    plays them, between waypoints too — that phase is lengthened in
+    proportion and the trajectory is solved again.
     """
     key = cache_key(scn, rate)
     if os.environ.get("TRAJ_NO_CACHE", "") in ("", "0"):

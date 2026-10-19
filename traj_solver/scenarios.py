@@ -1,10 +1,10 @@
 """
-scenarios.py — the four surface transitions, each built from geometry in six phases.
+scenarios.py — the four surface transitions, each built from geometry in five or six phases.
 
 Every transition carries the robot from one surface to another across an
 inside corner (floor → wall, wall → ceiling), an outside corner (top of a
 block → its side wall) or the end of a thin plate (top → underside).  All of
-them run through the same six phases:
+them run through the same phases:
 
   1 approach    both assemblies roll toward the transition until the
                 leading one is ready to pivot
@@ -14,6 +14,11 @@ them run through the same six phases:
   4 roll up     the trailing assembly rolls up to the transition
   5 pivot       the trailing assembly turns onto the new surface
   6 depart      both roll away to the standard end
+
+At an inside corner, 3 and 4 move the assemblies one after the other so the
+chain never folds up between the two surfaces.  At an outside corner or edge
+they are a single phase, "both roll", in which the two assemblies roll at the
+same time (Scenario.rolls_together), so those transitions have five phases.
 
 Each phase starts and ends at rest: its speed ramps up and back down along
 an S-curve (ease, timing.RAMP_TIME), so the robot never changes speed
@@ -27,13 +32,13 @@ depends on the transition (Scenario.partner_follows):
                   assemblies together at the cruise gap; in between, the gap
                   is whatever the geometry makes it.
   outside corner  the partner follows the pivoting assembly, rolling to keep
-  or edge         a constant gap.  Approach closes the gap from the cruise
-                  gap to that value and depart opens it again.  The value is
-                  computed for each transition (follow_gap): the gap that
-                  keeps the joints farthest from their limits.
-
-Phases 3 and 4 move the assemblies one after the other, leading one first,
-so the chain never folds up between the two surfaces.
+  or edge         the gap at a set value, but never backwards: where keeping
+                  it exactly would make the partner back up, it eases to a
+                  stop early and waits, and the gap opens a little instead
+                  (_without_backsteps).  Approach closes the gap from the
+                  cruise gap to that value and depart opens it again.  The
+                  value is computed for each transition (follow_gap): the gap
+                  that keeps the joints farthest from their limits.
 
 Every transition starts with its leading chain joint START_DISTANCE before the
 end of its approach surface and ends with its trailing chain joint
@@ -52,8 +57,10 @@ Positions come from geometry only:
     the solid has a thickness, round the next corner (pivot_pose)
 so changing the link lengths, wheel and arm geometry, or where the surfaces
 are, changes the motion automatically.  The plan is checked as it is sampled:
-neither assembly may enter the solid (wheels may touch it) and the two
-assemblies keep the hard clearance from each other (check_assemblies).
+the chain joints stay within the chain's reach (no farther apart than its
+length, no closer than it can fold, CHAIN_MIN_SPAN), neither assembly may
+enter the solid (wheels may touch it) and the two assemblies keep the hard
+clearance from each other (check_assemblies).
 Phase durations come from the speed limits in timing.py (see
 _phase_duration); the trajectory solver stretches a phase further if the
 joints cannot keep up.
@@ -70,8 +77,8 @@ from typing import Callable, Optional, Tuple
 import numpy as np
 from scipy.optimize import brentq
 
-from constraints import (FEASIBILITY_TOL, HARD_CLEARANCE, WheelGeometry, assembly_parts,
-                         evaluate, wheel_centers)
+from constraints import (FEASIBILITY_TOL, HARD_CLEARANCE, JOINT_HARD_LIMIT_DEG, WheelGeometry,
+                         assembly_parts, evaluate, wheel_centers)
 from environment import Environment, Surface
 from kinematics import q_display
 from solver import solve_branch_batch, posture_cost
@@ -83,6 +90,21 @@ l1 = 0.250                   # front link (m)
 l2 = 0.500                   # middle link (m)
 l3 = 0.250                   # back link (m)
 CHAIN_LENGTH = l1 + l2 + l3  # 1.00 m
+
+
+def _chain_min_span():
+    """
+    The shortest gap the chain can fold to: q2 and q3 bent the allowed way
+    (≤ 0, constraints.py) and no further than the hard joint limit.  With l2
+    along x, P3 − P0 = (l2 + l1 cos q2 + l3 cos q3, l3 sin q3 − l1 sin q2).
+    """
+    q = np.radians(np.linspace(-JOINT_HARD_LIMIT_DEG, 0.0, 221))
+    q2, q3 = np.meshgrid(q, q)
+    return float(np.hypot(l2 + l1 * np.cos(q2) + l3 * np.cos(q3),
+                          l3 * np.sin(q3) - l1 * np.sin(q2)).min())
+
+
+CHAIN_MIN_SPAN = _chain_min_span()   # ≈ 0.33 m
 
 # Wheel assemblies (measured dimensions in constraints.py).  The arms can be
 # rotated, so each kind of transition uses the arm layout that suits it.
@@ -161,6 +183,21 @@ class Scenario:
         partner can stay where it is.  At an outside corner or edge it swings
         around the outside of the transition, carrying its chain joint
         away — beyond the chain's reach if the partner stayed put.
+        """
+        return self.corner == "outside"
+
+    @property
+    def rolls_together(self):
+        """
+        Whether both assemblies roll at the same time between the two pivots
+        (True: one phase) or one after the other (False: the leading one
+        rolls clear, then the trailing one rolls up).  At an inside corner,
+        rolling both at once would bring them toward the corner together and
+        fold the chain up between the two surfaces.  At an outside corner or
+        edge, rolling both at once keeps the gap at or below the follow gap
+        all the way (each moves in a straight line, so the gap is largest at
+        the ends, where it is the follow gap); rolling them in turn would
+        stretch the chain over the transition instead.
         """
         return self.corner == "outside"
 
@@ -395,13 +432,55 @@ def _phase_duration(pose, minimum):
     return max(1, math.ceil(seconds / SCHEDULE_STEP - 1e-9)) * SCHEDULE_STEP
 
 
+def _without_backsteps(scn, pose, k, surface, side, approaching):
+    """
+    A pivot phase `pose` with its following assembly — element k of the
+    pose, resting on `surface` — changed so that it never rolls backwards.
+
+    Keeping the gap exactly can make the follower back up: through the thin
+    edge's half turn the pivoting chain joint swings out past the end of the
+    plate and then back under it, and the follower has to retreat to stay
+    `gap` from it.  Instead the follower waits: approaching the transition,
+    it never gets nearer to it than it will be later; leaving it, it never
+    comes back toward it.  It is then never nearer the pivoting joint than
+    following exactly would put it, so the gap opens where it waits.  Its
+    stops and starts are eased: its position is smoothed over RAMP_TIME by a
+    raised-cosine moving average, which keeps it moving one way and leaves
+    the ends of the phase where they were.
+
+    Returns `pose` itself when the follower never rolls backwards.
+    """
+    f = np.linspace(0.0, 1.0, 501)
+    u = np.array([along(surface, pose(x)[k]) for x in f])        # distance from the transition
+    held = np.maximum.accumulate(u[::-1])[::-1] if approaching else np.maximum.accumulate(u)
+    if np.allclose(held, u, rtol=0.0, atol=1e-9):
+        return pose
+    # RAMP_TIME as a fraction of the phase: between its own ramps a phase
+    # covers f at 1 / (duration − RAMP_TIME) per second (ease).
+    width = RAMP_TIME / max(_phase_duration(pose, 0.0) - RAMP_TIME, RAMP_TIME)
+    n = max(1, round(width / (f[1] - f[0]) / 2))
+    w = 1.0 + np.cos(np.linspace(-np.pi, np.pi, 2 * n + 3)[1:-1])    # raised cosine, 2n + 1 taps
+    # Point-reflected past both ends, so the ends stay where they are.
+    padded = np.concatenate([2 * held[0] - held[n:0:-1], held, 2 * held[-1] - held[-2:-n - 2:-1]])
+    smooth = np.convolve(padded, w / w.sum(), mode="valid")
+
+    def softened(x):
+        p = list(pose(x))
+        p[k] = rest_point(scn, surface, float(np.interp(x, f, smooth)), side)
+        return tuple(p)
+
+    return softened
+
+
 def plan_phases(scn, min_durations=None, gap=None):
     """
-    The six phases of a transition.
+    The phases of a transition: six, or five when the assemblies roll
+    together between the pivots (Scenario.rolls_together).
 
-    gap: outside corners and edges only — the gap (m) the partner keeps while
-    following a pivot.  Computed by follow_gap(scn) when not given.  Ignored
-    at inside corners, where the partner parks.
+    gap: outside corners and edges only — the gap (m) the partner aims to
+    keep while following a pivot (it opens a little where keeping it would
+    make the partner roll backwards).  Computed by follow_gap(scn) when not
+    given.  Ignored at inside corners, where the partner parks.
     min_durations: optional lower bound on each phase's duration (seconds),
     used by the trajectory solver to slow a phase the joints cannot keep up with.
     """
@@ -437,16 +516,6 @@ def plan_phases(scn, min_durations=None, gap=None):
     def lead_partner(T):
         return roll_to_separation(scn, B, lead, T if follows else trail_across, gap)
 
-    # 1 approach: from the standard start until the leading assembly is in
-    #   position to pivot.  Parked: both roll together at the cruise gap.
-    #   Following: the trailing assembly closes the gap to `gap`.
-    lead_start = rest_point(scn, A, START_DISTANCE, lead)
-    trail_start = rest_point(scn, A, START_DISTANCE + C, trail)
-    trail_waiting = trail_partner(lead_ready)
-
-    def approach(f):
-        return _lerp(lead_start, lead_ready, f), thA, _lerp(trail_start, trail_waiting, f), thA
-
     # 2 the leading assembly pivots; the trailing one parks or follows.
     def lead_pivot(f):
         J, theta = pivot_pose(scn, lead, f)
@@ -457,10 +526,26 @@ def plan_phases(scn, min_durations=None, gap=None):
         T, theta = pivot_pose(scn, trail, f)
         return lead_partner(T), thB, T, theta
 
-    # 3, 4: from the end of phase 2 to the start of phase 5.  The leading
-    #   assembly rolls along the new surface first (3), then the trailing one
-    #   rolls up to the transition (4).  Moving them one after the other
-    #   keeps the chain from folding up between the two surfaces.
+    # A follower never rolls backwards; the gap opens instead.
+    if follows:
+        lead_pivot = _without_backsteps(scn, lead_pivot, 2, A, trail, approaching=True)
+        trail_pivot = _without_backsteps(scn, trail_pivot, 0, B, lead, approaching=False)
+
+    # 1 approach: from the standard start until the leading assembly is in
+    #   position to pivot.  Parked: both roll together at the cruise gap.
+    #   Following: the trailing assembly closes the gap to `gap`.
+    lead_start = rest_point(scn, A, START_DISTANCE, lead)
+    trail_start = rest_point(scn, A, START_DISTANCE + C, trail)
+    trail_waiting = lead_pivot(0.0)[2]
+
+    def approach(f):
+        return _lerp(lead_start, lead_ready, f), thA, _lerp(trail_start, trail_waiting, f), thA
+
+    # 3, 4: from the end of phase 2 to the start of phase 5.  At an inside
+    #   corner the leading assembly rolls along the new surface first (3),
+    #   then the trailing one rolls up to the transition (4), which keeps the
+    #   chain from folding up between the two surfaces.  At an outside corner
+    #   or edge both do it at once, in one phase (Scenario.rolls_together).
     lead_across, _, trail_after, _ = lead_pivot(1.0)
     lead_waiting = trail_pivot(0.0)[0]
 
@@ -469,6 +554,9 @@ def plan_phases(scn, min_durations=None, gap=None):
 
     def trail_rolls(f):
         return lead_waiting, thB, _lerp(trail_after, trail_ready, f), thA
+
+    def both_roll(f):
+        return _lerp(lead_across, lead_waiting, f), thB, _lerp(trail_after, trail_ready, f), thA
 
     # 6 depart: both roll to the standard end.  Parked: together at the
     #   cruise gap.  Following: the gap opens from `gap` to the cruise gap.
@@ -479,10 +567,14 @@ def plan_phases(scn, min_durations=None, gap=None):
     def depart(f):
         return _lerp(lead_leaving, lead_end, f), thB, _lerp(trail_across, trail_end, f), thB
 
+    if scn.rolls_together:
+        middle = [("both roll", both_roll)]
+    else:
+        middle = [(f"{scn.lead} rolls clear", lead_rolls),
+                  (f"{trail_name} rolls up", trail_rolls)]
     specs = [("approach", approach),
              (f"{scn.lead} pivots", lead_pivot),
-             (f"{scn.lead} rolls clear", lead_rolls),
-             (f"{trail_name} rolls up", trail_rolls),
+             *middle,
              (f"{trail_name} pivots", trail_pivot),
              ("depart", depart)]
     minimum = list(min_durations) if min_durations is not None else [0.0] * len(specs)
@@ -527,8 +619,9 @@ def sample_poses(scn, phases, rate):
 
     Returns (times (N,), poses): each pose is a dict of x1, y1, theta1 (front)
     and x2, y2, theta2 (back) — the input the trajectory solver expects.
-    Raises ValueError if the chain joints end up out of the chain's reach or
-    an assembly collides (check_assemblies).
+    Raises ValueError if the chain joints end up out of the chain's reach
+    (farther apart than CHAIN_LENGTH or closer than CHAIN_MIN_SPAN) or an
+    assembly collides (check_assemblies).
     """
     starts = phase_starts(phases)
     total = starts[-1]
@@ -541,6 +634,9 @@ def sample_poses(scn, phases, rate):
         if gap > CHAIN_LENGTH:
             raise ValueError(f"{scn.name}: chain joints {gap:.3f} m apart at t = {t:.2f} s "
                              f"({name}), beyond the chain's reach")
+        if gap < CHAIN_MIN_SPAN:
+            raise ValueError(f"{scn.name}: chain joints {gap:.3f} m apart at t = {t:.2f} s "
+                             f"({name}), closer than the chain can fold ({CHAIN_MIN_SPAN:.3f} m)")
         problems = check_assemblies(scn, pose)
         if problems:
             listed = ", ".join(f"{k} ({v * 1000:+.1f} mm)" for k, v in problems.items())
@@ -586,8 +682,9 @@ def peak_joint_angle(scn, phases, rate=SAMPLE_RATE):
 
 def follow_gap(scn, rate=SAMPLE_RATE):
     """
-    The gap (m) the partner keeps while following a pivot at an outside
-    corner or edge: the one that keeps the joints farthest from their limits.
+    The gap (m) the partner aims to keep while following a pivot at an
+    outside corner or edge: the one that keeps the joints farthest from
+    their limits.
 
     Gaps are planned and scored by peak_joint_angle on a grid
     FOLLOW_GAP_STEP apart, up to the cruise gap.  The robot will not hold
