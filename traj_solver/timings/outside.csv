@@ -1,5 +1,5 @@
 # Outside corner (ceiling top to exterior wall): timing file for Motor/playback.py
-# Written by traj_solver/robot_timing.py from solve 881a7dd1a00b79af
+# Written by traj_solver/export_timing.py from solve ca28a65b39b23e7e
 # 183 waypoints, 6 per second, 30.333 s
 #
 # Columns

@@ -1,9 +1,9 @@
 """
-robot_timing.py — export each transition as a timing file for the robot
+export_timing.py — export each transition as a timing file for the robot
 (Motor/homing.py, Motor/playback.py).
 
 Usage:
-    python robot_timing.py [scenario | all]     default: all
+    python export_timing.py [scenario | all]     default: all
 
 Writes timings/<scenario>.csv: a header of '#' lines (units, conventions,
 the calibration used and how to interpolate), then one row per waypoint:
@@ -37,7 +37,7 @@ From the motion plan at each waypoint's instant, relative to the wheel's own
 assembly — what the wheel's motor must turn at (scenarios.wheel_speeds).
 Between waypoints the playback changes them linearly.
 
-The waypoint rate is timing.SAMPLE_RATE (6 by default; override with e.g.
+The waypoint rate is params.SAMPLE_RATE (6 by default; override with e.g.
 TRAJ_SAMPLE_RATE=3).
 """
 
@@ -48,10 +48,10 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from kinematics import q_display
+from core.kinematics import q_display
+from core.scenarios import SCENARIOS, wheel_speeds
+from core.trajectory import solve_trajectory, joint_speeds    # joint_speeds: the monotone rule above
 from motor_calibration import JOINTS, WHEELS
-from scenarios import SCENARIOS, wheel_speeds
-from trajectory import solve_trajectory, joint_speeds    # joint_speeds: the monotone rule above
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.path.join(_SCRIPT_DIR, "timings")
@@ -66,7 +66,7 @@ def _header(scn, traj):
                           for name, m in WHEELS.items())
     return f"""\
 # {scn.label}: timing file for Motor/playback.py
-# Written by traj_solver/robot_timing.py from solve {traj.key[:16]}
+# Written by traj_solver/export_timing.py from solve {traj.key[:16]}
 # {len(traj)} waypoints, {traj.rate:g} per second, {traj.times[-1]:.3f} s
 #
 # Columns

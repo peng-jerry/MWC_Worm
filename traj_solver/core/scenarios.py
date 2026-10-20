@@ -21,7 +21,7 @@ they are a single phase, "both roll", in which the two assemblies roll at the
 same time (Scenario.rolls_together), so those transitions have five phases.
 
 Each phase starts and ends at rest: its speed ramps up and back down along
-an S-curve (ease, timing.RAMP_TIME), so the robot never changes speed
+an S-curve (ease, params.RAMP_TIME), so the robot never changes speed
 abruptly.
 
 "Gap" means the distance between the two chain joints (P0 on the front
@@ -62,7 +62,7 @@ the chain joints stay within the chain's reach (no farther apart than its
 length, no closer than it can fold, CHAIN_MIN_SPAN), neither assembly may
 enter the solid (wheels may touch it) and the two assemblies keep the hard
 clearance from each other (check_assemblies).
-Phase durations come from the speed limits in timing.py (see
+Phase durations come from the speed limits in params.py (see
 _phase_duration); the trajectory solver stretches a phase further if the
 joints cannot keep up.
 
@@ -78,12 +78,12 @@ from typing import Callable, Optional, Tuple
 import numpy as np
 from scipy.optimize import brentq
 
-from constraints import (FEASIBILITY_TOL, HARD_CLEARANCE, JOINT_HARD_LIMIT_DEG, WheelGeometry,
-                         assembly_parts, evaluate, wheel_centers)
-from environment import Environment, Surface
-from kinematics import q_display
-from solver import solve_branch_batch, posture_cost
-from timing import SAMPLE_RATE, SCHEDULE_STEP, SLIDE_SPEED, PIVOT_RATE, RAMP_TIME
+from .chain_ik import solve_branch_batch, posture_cost
+from .constraints import (FEASIBILITY_TOL, HARD_CLEARANCE, JOINT_HARD_LIMIT_DEG, WheelGeometry,
+                          assembly_parts, evaluate, wheel_centers)
+from .environment import Environment, Surface
+from .kinematics import q_display
+from .params import SAMPLE_RATE, SCHEDULE_STEP, SLIDE_SPEED, PIVOT_RATE, RAMP_TIME
 
 
 # ── The robot ─────────────────────────────────────────────────────────────────

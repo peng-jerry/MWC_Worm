@@ -1,11 +1,11 @@
 """
-wheel_omega.py — wheel speed, joint angle and joint speed plots for one transition.
+plot_speeds.py — wheel speed, joint angle and joint speed plots for one transition.
 
 Usage:
-    python wheel_omega.py [floor_to_wall|wall_to_ceiling|outside|thin_edge]
+    python plot_speeds.py [floor_to_wall|wall_to_ceiling|outside|thin_edge]
     (default floor_to_wall)
 
-Solves the transition exactly as animate_transition.py does and plots, against
+Solves the transition exactly as animate.py does and plots, against
 time, with the phase boundaries marked:
   1. wheel motor speed of all four wheels — relative to the wheel's
      assembly, as in the timing files (rad/s, CCW positive;
@@ -18,7 +18,7 @@ time, with the phase boundaries marked:
      limits from constraints.py
   3. joint speeds (°/s) with the joint speed limit
 
-Writes wheel_omega/wheel_omega_<short name>.png.
+Writes outputs/speeds/<scenario>.png.
 """
 
 import os
@@ -30,18 +30,17 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from trajectory import solve_trajectory
-from constraints import JOINT_HARD_LIMIT_DEG, JOINT_SOFT_LIMIT_DEG
-from kinematics import q_display
+from core.trajectory import solve_trajectory
+from core.constraints import JOINT_HARD_LIMIT_DEG, JOINT_SOFT_LIMIT_DEG
+from core.kinematics import q_display
+from core.scenarios import SCENARIOS, wheel_speeds, wheels_touching
+from core.params import MAX_JOINT_SPEED, SLIDE_SPEED
 from motor_calibration import WHEELS as WHEEL_MOTORS
-from scenarios import SCENARIOS, wheel_speeds, wheels_touching
-from timing import MAX_JOINT_SPEED, SLIDE_SPEED
 
-OUT_NAMES = {"floor_to_wall": "wheel_omega_ftw.png", "wall_to_ceiling": "wheel_omega_wtc.png",
-             "outside": "wheel_omega_out.png", "thin_edge": "wheel_omega_te.png"}
+OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "speeds")
 
 
-def plot(name, out_dir):
+def plot(name, out_dir=OUT_DIR):
     scn = SCENARIOS[name]
     traj = solve_trajectory(scn)
     t = traj.times
@@ -109,7 +108,7 @@ def plot(name, out_dir):
                  fontsize=8, color="gray", va="top", rotation=90)
 
     os.makedirs(out_dir, exist_ok=True)
-    out = os.path.join(out_dir, OUT_NAMES[name])
+    out = os.path.join(out_dir, f"{name}.png")
     fig.savefig(out, dpi=150)
     plt.close(fig)
     print(f"Saved: {out}")
@@ -121,4 +120,4 @@ if __name__ == "__main__":
     if name not in SCENARIOS:
         print(f"Unknown scenario '{name}'. Choose: {list(SCENARIOS)}")
         sys.exit(1)
-    plot(name, os.path.join(os.path.dirname(os.path.abspath(__file__)), "wheel_omega"))
+    plot(name)

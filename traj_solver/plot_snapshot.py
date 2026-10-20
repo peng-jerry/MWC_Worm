@@ -1,18 +1,18 @@
 """
-main.py — snapshot of one transition, once the leading assembly has rolled clear.
+plot_snapshot.py — snapshot of one transition, once the leading assembly has rolled clear.
 
 Usage:
-    python main.py [scenario]
+    python plot_snapshot.py [scenario | all]
     Scenarios: floor_to_wall (default), wall_to_ceiling, outside, thin_edge
 
-Solves the transition exactly as animate_transition.py does and draws the
+Solves the transition exactly as animate.py does and draws the
 frame at the end of phase 3, when the leading assembly has rolled clear of
 the transition.  At an inside corner the trailing one has not yet rolled up
 to it; at an outside corner or edge, where both roll together, it has.
 Joint angles are printed in the calf-up display convention (q1/q4: 0° =
 link straight up from the calf).
 
-Writes robot_configs/robot_config_<scenario>.png.
+Writes outputs/snapshots/<scenario>.png.
 """
 
 import os
@@ -24,17 +24,15 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from animate_transition import draw_frame, plot_limits
-from trajectory import solve_trajectory
-from kinematics import q_display
-from scenarios import SCENARIOS, l1, l2, l3
+from core.drawing import draw_frame, plot_limits
+from core.trajectory import solve_trajectory
+from core.kinematics import q_display
+from core.scenarios import SCENARIOS, l1, l2, l3
+
+OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "snapshots")
 
 
-def main():
-    name = sys.argv[1] if len(sys.argv) > 1 else "floor_to_wall"
-    if name not in SCENARIOS:
-        print(f"Unknown scenario '{name}'. Choose: {list(SCENARIOS)}")
-        sys.exit(1)
+def plot(name, out_dir=OUT_DIR):
     scn = SCENARIOS[name]
     traj = solve_trajectory(scn)
 
@@ -64,13 +62,18 @@ def main():
     ax.legend(loc="upper right", fontsize=9)
     plt.tight_layout()
 
-    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "robot_configs",
-                       f"robot_config_{name}.png")
-    os.makedirs(os.path.dirname(out), exist_ok=True)
+    os.makedirs(out_dir, exist_ok=True)
+    out = os.path.join(out_dir, f"{name}.png")
     fig.savefig(out, dpi=150)
     plt.close(fig)
     print(f"\n  Saved → {out}")
+    return out
 
 
 if __name__ == "__main__":
-    main()
+    arg = sys.argv[1] if len(sys.argv) > 1 else "floor_to_wall"
+    if arg != "all" and arg not in SCENARIOS:
+        print(f"Unknown scenario '{arg}'. Choose: {list(SCENARIOS)} or 'all'")
+        sys.exit(1)
+    for name in (SCENARIOS if arg == "all" else [arg]):
+        plot(name)

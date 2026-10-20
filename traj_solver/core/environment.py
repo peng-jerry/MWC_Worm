@@ -30,8 +30,8 @@ from typing import Tuple
 
 import numpy as np
 
-from geometry import (clip_polygon, closest_points, dot, point_segment_distance,
-                      segment_distance, segments_cross)
+from .geometry import (clip_polygon, closest_points, dot, point_segment_distance,
+                       segment_distance, segments_cross)
 
 FAR = 100.0     # m; the half-line surfaces are handled as segments this long
 

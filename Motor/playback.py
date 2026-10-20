@@ -9,7 +9,7 @@ Usage:
 
 Run homing.py first to reach the start pose before executing this script.
 
-Each CSV row is a waypoint at time time_s (traj_solver/robot_timing.py).
+Each CSV row is a waypoint at time time_s (traj_solver/export_timing.py).
 Every 1/INTERP_HZ seconds the script sends each joint the point at that
 moment on the cubic through its position and speed at the two surrounding
 waypoints (cubic Hermite interpolation):
@@ -19,7 +19,7 @@ waypoints (cubic Hermite interpolation):
 with α ∈ [0, 1] the fraction of the way from waypoint k to k+1 and T the time
 between them.  The curve passes exactly through every waypoint with the
 waypoint's speed, so the motion is smooth across waypoints.
-traj_solver/playback_check.py simulates this same interpolation.
+traj_solver/check_playback.py simulates this same interpolation.
 
 The CSV is already in each motor's own units (calibration lives in
 traj_solver/motor_calibration.py: motor positions after each joint's 30:1
@@ -42,7 +42,7 @@ _PYBEAR_DIR = os.path.join(
 sys.path.insert(0, _PYBEAR_DIR)
 from pybear import Manager
 
-# ── Motor calibration (shared with traj_solver/robot_timing.py) ───────────────
+# ── Motor calibration (shared with traj_solver/export_timing.py) ──────────────
 _TRAJ_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "traj_solver")
 sys.path.insert(0, _TRAJ_DIR)
 from motor_calibration import JOINTS
@@ -113,7 +113,7 @@ def hermite(q_k, dq_k, q_k1, dq_k1, T, alpha):
     """
     Cubic Hermite position at normalised time alpha in [0, 1]: the cubic that
     starts at q_k with speed dq_k and ends T seconds later at q_k1 with speed
-    dq_k1.  Same formula as traj_solver/playback_check.py.
+    dq_k1.  Same formula as traj_solver/check_playback.py.
     """
     a2, a3 = alpha * alpha, alpha * alpha * alpha
     h00, h10 = 2 * a3 - 3 * a2 + 1, a3 - 2 * a2 + alpha

@@ -1,17 +1,17 @@
 """
-keyframes.py — show each transition at its phase boundaries.
+plot_phases.py — show each transition at its phase boundaries.
 
 Usage:
-    python keyframes.py [scenario | all]     default: all
+    python plot_phases.py [scenario | all]     default: all
 
 For each transition, draws a panel taken from the solved trajectory for the
 start, then one for the end of each phase (approach, pivot, roll clear, roll
 up, pivot, depart; roll clear and roll up are one "both roll" phase at an
 outside corner or edge — the last panel is the finish).  Phase durations are whole multiples of
-timing.SCHEDULE_STEP, so at 3 or 6 fps every boundary is an actual frame — the
-panels show exactly what the animation and robot_timing.py contain.
+params.SCHEDULE_STEP, so at 3 or 6 fps every boundary is an actual frame — the
+panels show exactly what the animation and export_timing.py contain.
 
-Writes keyframes/keyframes_<scenario>.png.
+Writes outputs/phases/<scenario>.png.
 """
 
 import math
@@ -24,13 +24,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from animate_transition import draw_frame, plot_limits
-from trajectory import solve_trajectory
-from kinematics import q_display
-from scenarios import SCENARIOS
+from core.drawing import draw_frame, plot_limits
+from core.trajectory import solve_trajectory
+from core.kinematics import q_display
+from core.scenarios import SCENARIOS
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUT_DIR = os.path.join(_SCRIPT_DIR, "keyframes")
+OUT_DIR = os.path.join(_SCRIPT_DIR, "outputs", "phases")
 
 
 def plot(name, out_dir=OUT_DIR):
@@ -66,7 +66,7 @@ def plot(name, out_dir=OUT_DIR):
     fig.suptitle(scn.label, fontsize=11)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     os.makedirs(out_dir, exist_ok=True)
-    out = os.path.join(out_dir, f"keyframes_{name}.png")
+    out = os.path.join(out_dir, f"{name}.png")
     fig.savefig(out, dpi=120, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved → {out}")

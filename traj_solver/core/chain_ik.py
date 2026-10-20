@@ -1,5 +1,5 @@
 """
-solver.py — closed-chain inverse kinematics for one pair of assembly poses.
+chain_ik.py — closed-chain inverse kinematics for one pair of assembly poses.
 
 The chain
 ---------
@@ -30,7 +30,7 @@ frame of a transition at once.
 
 import numpy as np
 
-from kinematics import q_display
+from .kinematics import q_display
 
 
 def _wrap(a):

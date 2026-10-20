@@ -51,7 +51,7 @@ from typing import Tuple
 
 import numpy as np
 
-from kinematics import q_display
+from .kinematics import q_display
 
 
 # ------------------------------------------------------------------ #
@@ -260,7 +260,7 @@ def evaluate(Q, pose, env, wg: WheelGeometry, l1, l2, l3) -> Evaluation:
     pose  dict with the assemblies' chain joints and orientations x1, y1,
           theta1 (front) and x2, y2, theta2 (back), as from
           scenarios.sample_poses.  The candidates are expected to close the
-          chain (solver.solve_branch_batch), so both assemblies are placed
+          chain (chain_ik.solve_branch_batch), so both assemblies are placed
           from the pose.
     env   environment.Environment of the transition
     """

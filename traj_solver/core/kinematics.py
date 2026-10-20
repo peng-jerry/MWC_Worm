@@ -14,7 +14,7 @@ Chain topology:
 
 All angles in radians.
 
-Display convention (wheel_omega.py, visualize.py, main.py):
+Display convention (plot_speeds.py, drawing.py, plot_snapshot.py):
   q1_display = q1 - π/2   (0° = link straight up from front calf)
   q4_display = q4 - π/2   (0° = last link directly above back calf, i.e. P2 above P3)
   q2, q3 are displayed as-is.

@@ -5,11 +5,12 @@ Usage:
     python build_all.py              # all scenarios, all outputs
     python build_all.py --no-render  # skip GIF rendering (violation check only)
 
-Outputs written:
-    gifs/           floor_to_wall.gif, wall_to_ceiling.gif, outside.gif, thin_edge.gif
-    wheel_omega/    wheel_omega_ftw.png, _wtc.png, _out.png, _te.png
-    timings/        floor_to_wall.csv, wall_to_ceiling.csv, outside.csv, thin_edge.csv
-    keyframes/      keyframes_floor_to_wall.png, ..._wall_to_ceiling.png, ..._outside.png, ..._thin_edge.png
+Outputs written, one file per scenario (floor_to_wall, wall_to_ceiling, outside, thin_edge):
+    outputs/gifs/<scenario>.gif        animate.py
+    outputs/speeds/<scenario>.png      plot_speeds.py
+    outputs/phases/<scenario>.png      plot_phases.py
+    outputs/snapshots/<scenario>.png   plot_snapshot.py
+    timings/<scenario>.csv             export_timing.py   (read by Motor/)
 """
 
 import subprocess
@@ -41,22 +42,25 @@ def run(label, cmd):
         _failed.append(label)
 
 
-# ── animate_transition (one call per scenario) ────────────────────────────────
+# ── animate (one call per scenario) ───────────────────────────────────────────
 for sc in SCENARIOS:
-    cmd = [_PY, "animate_transition.py", sc]
+    cmd = [_PY, "animate.py", sc]
     if NO_RENDER:
         cmd.append("--no-render")
-    run(f"animate_transition  {sc}", cmd)
+    run(f"animate             {sc}", cmd)
 
-# ── wheel_omega (one call per scenario) ───────────────────────────────────────
+# ── plot_speeds (one call per scenario) ───────────────────────────────────────
 for sc in SCENARIOS:
-    run(f"wheel_omega         {sc}", [_PY, "wheel_omega.py", sc])
+    run(f"plot_speeds         {sc}", [_PY, "plot_speeds.py", sc])
 
-# ── robot_timing (single call handles all scenarios) ─────────────────────────
-run("robot_timing        all", [_PY, "robot_timing.py", "all"])
+# ── export_timing (single call handles all scenarios) ────────────────────────
+run("export_timing       all", [_PY, "export_timing.py", "all"])
 
-# ── keyframes (single call handles all scenarios) ────────────────────────────
-run("keyframes           all", [_PY, "keyframes.py", "all"])
+# ── plot_phases (single call handles all scenarios) ──────────────────────────
+run("plot_phases         all", [_PY, "plot_phases.py", "all"])
+
+# ── plot_snapshot (single call handles all scenarios) ────────────────────────
+run("plot_snapshot       all", [_PY, "plot_snapshot.py", "all"])
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 total = len(_passed) + len(_failed)

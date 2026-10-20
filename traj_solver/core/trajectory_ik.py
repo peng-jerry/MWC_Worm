@@ -4,8 +4,8 @@ dynamic programming.
 
 Why a whole-trajectory solve
 ----------------------------
-At every frame the chain has one free degree of freedom (see solver.py): for
-any q1 on an elbow branch, solver.solve_branch_batch gives the exact q2..q4
+At every frame the chain has one free degree of freedom (see chain_ik.py): for
+any q1 on an elbow branch, chain_ik.solve_branch_batch gives the exact q2..q4
 that close the chain.  Solving frame by frame means choosing each frame's q1
 without knowing what later frames will need, so the robot can be cornered
 into a joint step faster than the motors allow.  Choosing all frames together
@@ -73,9 +73,9 @@ is searched: the other one breaks the bend rule (constraints.py) everywhere.
 
 import numpy as np
 
-from constraints import evaluate
-from kinematics import forward_kinematics
-from solver import solve_branch_batch, posture_cost
+from .chain_ik import solve_branch_batch, posture_cost
+from .constraints import evaluate
+from .kinematics import forward_kinematics
 
 # Hard rules: violations dominate every other cost term.
 INFEASIBLE_COST     = 1e6   # per frame whose configuration breaks a hard rule

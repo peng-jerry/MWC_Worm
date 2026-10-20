@@ -1,7 +1,7 @@
 """
 trajectory.py — solve a transition's joint angles once, and reuse the result.
 
-  solve_trajectory   samples the phases at timing.SAMPLE_RATE, fixes both ends
+  solve_trajectory   samples the phases at params.SAMPLE_RATE, fixes both ends
                      to the cruise posture, and lets trajectory_ik choose every
                      frame's joint angles together.  If a joint would have to
                      move faster than the limit, that phase is slowed down and
@@ -11,10 +11,10 @@ Cache
 -----
 A solve takes from about 2 s (inside corners) to 20 s (outside corner, thin
 edge) and every script needs the same result, so each solved transition is
-saved in .cache/.  Its key is built from the transition's name, the sample
-rate, the numpy and scipy versions, and the source of this module and every
-module it imports from this directory (found by reading the imports, so a
-new module is picked up automatically).  Any change to the code or the
+saved in traj_solver/.cache/.  Its key is built from the transition's name,
+the sample rate, the numpy and scipy versions, and the source of this module
+and every module of this package (core/) it imports, directly or indirectly
+(found by reading the imports, so a new module is picked up automatically).  Any change to the code or the
 parameters therefore changes the key, and a stale result is never reused.
 Older entries for the same transition and rate are deleted when a new one is
 saved.
@@ -33,14 +33,14 @@ from typing import Optional
 import numpy as np
 import scipy
 
-from kinematics import q_display
-from scenarios import (Scenario, l1, l2, l3, plan_phases, phase_starts, sample_poses,
-                       cruise_posture, follow_gap)
-from timing import SAMPLE_RATE, PLAN_JOINT_SPEED
-from trajectory_ik import solve_trajectory_dp
+from .kinematics import q_display
+from .params import SAMPLE_RATE, PLAN_JOINT_SPEED
+from .scenarios import (Scenario, l1, l2, l3, plan_phases, phase_starts, sample_poses,
+                        cruise_posture, follow_gap)
+from .trajectory_ik import solve_trajectory_dp
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
-CACHE_DIR = os.path.join(_DIR, ".cache")
+CACHE_DIR = os.path.join(os.path.dirname(_DIR), ".cache")    # traj_solver/.cache, beside the scripts
 
 # A phase is slowed down when a joint exceeds PLAN_JOINT_SPEED by more than
 # RETIME_TOLERANCE in it, as the robot plays it (_phase_peak_speeds); the
@@ -103,7 +103,7 @@ class Trajectory:
 def joint_speeds(times, qs):
     """
     Speed (rad/s) of each joint at each waypoint, for angles qs (N, J) at
-    times (N,), as the robot plays them (robot_timing.py): the monotone
+    times (N,), as the robot plays them (export_timing.py): the monotone
     ("PCHIP") rule of Fritsch and Carlson — a weighted harmonic mean of the
     step speeds on both sides when they have the same sign, 0 where the joint
     stops or turns back — and 0 at both ends.
@@ -168,8 +168,11 @@ def _solve(scn, rate):
 # ------------------------------------------------------------------ #
 
 def _solver_sources():
-    """{module name: source bytes} for this module and every module it
-    imports from this directory, directly or indirectly."""
+    """{module name: source bytes} for this module and every module of this
+    package it imports, directly or indirectly.  Relative imports
+    (from .scenarios import …, from . import scenarios) and absolute ones
+    (from core.scenarios import …, import core.scenarios) are both followed."""
+    pkg = __package__                                   # "core"
     sources, todo = {}, [os.path.splitext(os.path.basename(__file__))[0]]
     while todo:
         name = todo.pop()
@@ -180,11 +183,15 @@ def _solver_sources():
         for node in ast.walk(ast.parse(sources[name])):
             if isinstance(node, ast.Import):
                 names = [a.name for a in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
                 names = [node.module]
+            elif isinstance(node, ast.ImportFrom) and node.level == 1:
+                names = ([f"{pkg}.{node.module}"] if node.module
+                         else [f"{pkg}.{a.name}" for a in node.names])
             else:
                 continue
-            todo += [n for n in names if os.path.exists(os.path.join(_DIR, n + ".py"))]
+            local = [n[len(pkg) + 1:] for n in names if n.startswith(pkg + ".")]
+            todo += [n for n in local if os.path.exists(os.path.join(_DIR, n + ".py"))]
     return sources
 
 
@@ -251,7 +258,7 @@ def solve_trajectory(scn, rate=SAMPLE_RATE):
     At an outside corner or edge the follow gap is chosen first
     (scenarios.follow_gap).  The phases are then timed from the wheel and
     pivot speeds alone (scenarios.plan_phases).  If the solved joints must
-    move faster than timing.PLAN_JOINT_SPEED in some phase — as the robot
+    move faster than params.PLAN_JOINT_SPEED in some phase — as the robot
     plays them, between waypoints too — that phase is lengthened in
     proportion and the trajectory is solved again.
     """

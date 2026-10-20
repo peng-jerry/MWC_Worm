@@ -18,11 +18,11 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import scenarios as S
-from constraints import (CLEARANCE_GROUPS, FEASIBILITY_TOL, HARD_CLEARANCE, JOINT_HARD_LIMIT_DEG,
-                         JOINT_SOFT_LIMIT_DEG, SOFT_CLEARANCE, Evaluation, evaluate)
-from environment import Environment, Surface
-from geometry import point_segment_distance, segment_distance, segments_cross
+from core import scenarios as S
+from core.constraints import (CLEARANCE_GROUPS, FEASIBILITY_TOL, HARD_CLEARANCE, JOINT_HARD_LIMIT_DEG,
+                              JOINT_SOFT_LIMIT_DEG, SOFT_CLEARANCE, Evaluation, evaluate)
+from core.environment import Environment, Surface
+from core.geometry import point_segment_distance, segment_distance, segments_cross
 
 FAILURES = []
 

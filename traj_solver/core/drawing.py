@@ -1,14 +1,101 @@
 """
-Matplotlib visualization of the robot configuration.
+drawing.py — matplotlib drawing of a transition: the solid around it, the
+robot's physical outline, and the chain with both wheel assemblies.
+
+  plot_limits   axis limits that contain the whole solved transition
+  draw_frame    one state of a transition: surfaces, outline and robot
+  plot_robot    the chain and both wheel assemblies (also usable on its own)
+
+Used by animate.py, plot_phases.py and plot_snapshot.py.
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
-from kinematics import forward_kinematics, q_display as _q_display
-from constraints import WheelGeometry
+from matplotlib.patches import Polygon
+
+from .constraints import JOINT_RADIUS, WheelGeometry, assembly_parts, wheel_centers
+from .kinematics import forward_kinematics, q_display as _q_display
+from .scenarios import l1, l2, l3
 
 _WG = WheelGeometry()   # default (measured) assembly geometry
 
+
+# ------------------------------------------------------------------ #
+#  Transition                                                         #
+# ------------------------------------------------------------------ #
+
+def plot_limits(traj, margin=0.15):
+    """
+    Axis limits that contain the chain and wheels in every frame, plus a
+    margin.  A side fixed by the scenario's xlim / ylim replaces the fitted one.
+    """
+    scn = traj.scenario
+    pts = [np.asarray(scn.approach.origin, dtype=float), np.asarray(scn.depart.origin, dtype=float)]
+    for q, _, p in traj:
+        chain, _ = forward_kinematics(q, p["x1"], p["y1"], p["theta1"], l1, l2, l3)
+        pts.extend(chain)
+        pts.extend(wheel_centers(p["x1"], p["y1"], p["theta1"], scn.wg, side=1))
+        pts.extend(wheel_centers(p["x2"], p["y2"], p["theta2"], scn.wg, side=-1))
+    pts = np.array(pts)
+    lo, hi = pts.min(axis=0) - margin, pts.max(axis=0) + margin
+    return tuple(tuple(fit if fixed is None else fixed for fit, fixed in zip((lo[i], hi[i]), lim))
+                 for i, lim in enumerate((scn.xlim, scn.ylim)))
+
+
+def draw_surfaces(ax, scn, xlim, ylim, marker_scale=1.0):
+    """Draw the solid around the transition (scenarios.Scenario.env), filled,
+    with its faces outlined."""
+    env = scn.env
+    for k, poly in enumerate(env.solid_polygons(xlim, ylim)):
+        # Opaque, so the pieces of an inside corner's solid overlap invisibly.
+        ax.add_patch(Polygon(np.array(poly), closed=True, facecolor="#e4e4e4", edgecolor="none",
+                             zorder=0, label="Solid" if k == 0 else None))
+    for k, (a, b) in enumerate(env.face_segments()):
+        ax.plot([a[0], b[0]], [a[1], b[1]], color="dimgray", lw=2, zorder=1,
+                label="Surface" if k == 0 else None)
+
+
+def _capsule_outline(a, b, r, n=24):
+    """Points around a capsule (segment a–b thickened by r), for drawing."""
+    d = b - a
+    angle = np.arctan2(d[1], d[0]) if np.linalg.norm(d) > 0 else 0.0
+    t1 = np.linspace(angle + np.pi / 2, angle + 3 * np.pi / 2, n)
+    t2 = np.linspace(angle - np.pi / 2, angle + np.pi / 2, n)
+    return np.vstack([a + r * np.stack([np.cos(t1), np.sin(t1)], axis=1),
+                      b + r * np.stack([np.cos(t2), np.sin(t2)], axis=1)])
+
+
+def draw_outline(ax, scn, q, p, marker_scale=1.0):
+    """Draw the robot's physical outline (constraints.py) — the shapes the
+    clearance rules are checked against — as thin outlines."""
+    chain, _ = forward_kinematics(q, p["x1"], p["y1"], p["theta1"], l1, l2, l3)
+    shapes = [(chain[i], chain[i + 1], JOINT_RADIUS, "steelblue") for i in range(3)]
+    for x, y, theta, side, color in ((p["x1"], p["y1"], p["theta1"], +1, "forestgreen"),
+                                     (p["x2"], p["y2"], p["theta2"], -1, "crimson")):
+        shapes += [(a, b, r, color) for a, b, r in assembly_parts(x, y, theta, scn.wg, side).values()]
+    for a, b, r, color in shapes:
+        ax.add_patch(Polygon(_capsule_outline(np.asarray(a), np.asarray(b), r), closed=True,
+                             fill=False, edgecolor=color, lw=0.6 * marker_scale, alpha=0.6, zorder=2))
+
+
+def draw_frame(ax, scn, q, p, xlim, ylim, title=None, marker_scale=1.0, show_labels=True):
+    """Draw one state of transition `scn` — joint angles q, assembly pose p:
+    environment, chain and both assemblies, with their physical outline."""
+    wg = scn.wg
+    draw_surfaces(ax, scn, xlim, ylim, marker_scale)
+    draw_outline(ax, scn, q, p, marker_scale)
+    plot_robot(q, p["x1"], p["y1"], p["theta1"], p["x2"], p["y2"], p["theta2"], l1, l2, l3,
+               axle_half_length=wg.bar_len, axle_a_len=wg.bar_len_a, wheel_radius=wg.wheel_r,
+               calf=wg.calf, arm_a1=wg.arm_a1, arm_b1=wg.arm_b1, arm_a2=wg.arm_a2, arm_b2=wg.arm_b2,
+               ax=ax, title=title, marker_scale=marker_scale, show_labels=show_labels)
+    ax.set_xlim(xlim)
+    ax.set_ylim(ylim)
+    ax.set_aspect("equal")
+
+
+# ------------------------------------------------------------------ #
+#  Robot                                                              #
+# ------------------------------------------------------------------ #
 
 def plot_robot(
     q,

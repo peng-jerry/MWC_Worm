@@ -13,13 +13,13 @@ overall time.
 
 The CSV is in each motor's own units (motor positions, after the 30:1 worm);
 speeds, tolerances and printed angles here are at the joint, converted with
-the same table robot_timing.py uses (traj_solver/motor_calibration.py).
+the same table export_timing.py uses (traj_solver/motor_calibration.py).
 
 BEFORE RUNNING:
   1. Calibrate in traj_solver/motor_calibration.py — offset = the motor's
      reading with the joint at 0 (link straight up from the calf for q1/q4,
      straight for q2/q3), plus direction sign — then re-run
-     traj_solver/robot_timing.py.
+     traj_solver/export_timing.py.
      Read the offsets with:  python -c "from pybear import Manager; b=Manager.BEAR('/dev/ttyUSB0',8000000); print(b.get_present_position(1,2,3,4))"
   2. Confirm MOTOR_IDS matches your wiring.
   3. Confirm PORT matches your serial port.
@@ -39,7 +39,7 @@ _PYBEAR_DIR = os.path.join(
 sys.path.insert(0, _PYBEAR_DIR)
 from pybear import Manager
 
-# ── Motor calibration (shared with traj_solver/robot_timing.py) ───────────────
+# ── Motor calibration (shared with traj_solver/export_timing.py) ──────────────
 _TRAJ_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "traj_solver")
 sys.path.insert(0, _TRAJ_DIR)
 from motor_calibration import JOINTS

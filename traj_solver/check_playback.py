@@ -1,9 +1,9 @@
 """
-playback_check.py — play a timing file the way the robot does, and measure
+check_playback.py — play a timing file the way the robot does, and measure
 what happens between the waypoints.
 
 Usage:
-    python playback_check.py [scenario | all] [--rate R]     default: all
+    python check_playback.py [scenario | all] [--rate R]     default: all
 
 Motor/playback.py sends every joint, PLAYBACK_HZ times a second, the point on
 the cubic Hermite curve through the two surrounding waypoints (position and
@@ -27,7 +27,7 @@ The geometry is checked at every playback update; speeds and accelerations
 are found along the whole of each curve.
 
 By default the timing files in timings/ are checked; a file that no longer
-matches the solved transition is reported (run robot_timing.py).  With
+matches the solved transition is reported (run export_timing.py).  With
 --rate R the transitions are solved at R waypoints per second and checked
 without writing any file, to compare waypoint rates.
 """
@@ -38,12 +38,12 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from constraints import CLEARANCE_GROUPS, HARD_CLEARANCE, SOFT_CLEARANCE, evaluate
+from core.constraints import CLEARANCE_GROUPS, HARD_CLEARANCE, SOFT_CLEARANCE, evaluate
+from core.params import MAX_JOINT_SPEED
+from core.scenarios import SCENARIOS, l1, l2, l3, plan_pose
+from core.trajectory import solve_trajectory
+from export_timing import OUT_DIR, read_timing, waypoints
 from motor_calibration import JOINTS, WHEELS
-from robot_timing import OUT_DIR, read_timing, waypoints
-from scenarios import SCENARIOS, l1, l2, l3, plan_pose
-from timing import MAX_JOINT_SPEED
-from trajectory import solve_trajectory
 
 PLAYBACK_HZ = 100           # Motor/playback.py INTERP_HZ
 CURVE_POINTS = 51           # points per curve segment for speed and acceleration
@@ -207,7 +207,7 @@ def main():
             cols = _from_file(traj)
             if cols is None:
                 print(f"\n=== {name}: timings/{name}.csv is missing or out of date — "
-                      f"run robot_timing.py first")
+                      f"run export_timing.py first")
                 continue
             source = f"timings/{name}.csv"
         else:

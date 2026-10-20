@@ -2,7 +2,7 @@
 motor_calibration.py — how each motor measures the angles and speeds in the
 timing files.
 
-robot_timing.py writes the timing files in each motor's own convention:
+export_timing.py writes the timing files in each motor's own convention:
 
     joint motor position = offset + sign × ratio × joint angle
     joint motor speed    =          sign × ratio × joint speed
@@ -28,7 +28,7 @@ The ratios are known: each chain joint is driven through a 30:1 worm gear,
 and each arm A wheel directly.  Arm B wheels have no motor (they spin
 freely), so they are None and the timing files carry no column for them.
 Offsets and signs are pass-throughs (0, +1) until measured on the robot.
-After changing this file, run robot_timing.py again (the solve itself is
+After changing this file, run export_timing.py again (the solve itself is
 cached and does not depend on it).
 """
 

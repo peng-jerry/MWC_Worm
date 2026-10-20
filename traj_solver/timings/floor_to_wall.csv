@@ -1,5 +1,5 @@
 # Floor to wall (inside corner): timing file for Motor/playback.py
-# Written by traj_solver/robot_timing.py from solve 46786745769f20b9
+# Written by traj_solver/export_timing.py from solve 86935a35913b7864
 # 225 waypoints, 6 per second, 37.333 s
 #
 # Columns

@@ -1,26 +1,28 @@
 """
-animate_transition.py — solve a transition's joint angles, check them, render them.
+animate.py — solve a transition's joint angles, check them, render them.
 
 Pipeline
 --------
-  scenarios.py       geometry and the phases of each transition
+  core/scenarios.py  geometry and the phases of each transition
                      (approach, pivot, roll clear, roll up, pivot, depart;
                      roll clear and roll up are one phase at an outside
                      corner or edge), each easing in and out of rest
-  trajectory.py      solve_trajectory: samples the phases at
-                     timing.SAMPLE_RATE and lets trajectory_ik choose every
+  core/trajectory.py solve_trajectory: samples the phases at
+                     params.SAMPLE_RATE and lets trajectory_ik choose every
                      frame's joint angles together (cached between runs)
   render_video       GIF/MP4 of the solved transition, with every part drawn
-                     at its real size (constraints.py outline)
+                     at its real size (core/drawing.py, constraints.py outline)
   __main__           solve, run the built-in check (hard rules, joint
                      limits, bend direction, joint speed, wheel speed) and
                      render
 
 Usage:
-    python animate_transition.py [scenario] [--no-render]
+    python animate.py [scenario] [--no-render]
         scenario      floor_to_wall | wall_to_ceiling | outside | thin_edge
                       (default wall_to_ceiling)
         --no-render   solve and check only
+
+Writes outputs/gifs/<scenario>.mp4 (.gif if ffmpeg is not installed).
 """
 
 import os
@@ -31,17 +33,15 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-from matplotlib.patches import Polygon
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from constraints import (JOINT_HARD_LIMIT_DEG, JOINT_SOFT_LIMIT_DEG, JOINT_RADIUS,
-                         assembly_parts, wheel_centers)
-from kinematics import forward_kinematics, q_display
-from scenarios import SCENARIOS, WHEELS, CHAIN_LENGTH, l1, l2, l3, wheel_speeds
-from timing import PLAN_JOINT_SPEED, MAX_JOINT_SPEED, SLIDE_SPEED
-from trajectory import solve_trajectory
-from visualize import plot_robot
+from core.constraints import JOINT_HARD_LIMIT_DEG, JOINT_SOFT_LIMIT_DEG
+from core.drawing import draw_frame, plot_limits
+from core.kinematics import q_display
+from core.params import PLAN_JOINT_SPEED, MAX_JOINT_SPEED, SLIDE_SPEED
+from core.scenarios import SCENARIOS, WHEELS, CHAIN_LENGTH, wheel_speeds
+from core.trajectory import solve_trajectory
 
 
 def _wrap(a):
@@ -50,7 +50,7 @@ def _wrap(a):
 
 
 # ------------------------------------------------------------------ #
-#  Drawing                                                            #
+#  Animation                                                          #
 # ------------------------------------------------------------------ #
 
 # Animation playback: every GIF_FRAME_STEP-th solved frame is drawn, one every
@@ -72,75 +72,6 @@ class _GifWriter(animation.PillowWriter):
     def finish(self):
         self._frames[0].save(self.outfile, save_all=True, append_images=self._frames[1:],
                              duration=10 * round(100 / self.fps), loop=0)
-
-
-def plot_limits(traj, margin=0.15):
-    """
-    Axis limits that contain the chain and wheels in every frame, plus a
-    margin.  A side fixed by the scenario's xlim / ylim replaces the fitted one.
-    """
-    scn = traj.scenario
-    pts = [np.asarray(scn.approach.origin, dtype=float), np.asarray(scn.depart.origin, dtype=float)]
-    for q, _, p in traj:
-        chain, _ = forward_kinematics(q, p["x1"], p["y1"], p["theta1"], l1, l2, l3)
-        pts.extend(chain)
-        pts.extend(wheel_centers(p["x1"], p["y1"], p["theta1"], scn.wg, side=1))
-        pts.extend(wheel_centers(p["x2"], p["y2"], p["theta2"], scn.wg, side=-1))
-    pts = np.array(pts)
-    lo, hi = pts.min(axis=0) - margin, pts.max(axis=0) + margin
-    return tuple(tuple(fit if fixed is None else fixed for fit, fixed in zip((lo[i], hi[i]), lim))
-                 for i, lim in enumerate((scn.xlim, scn.ylim)))
-
-
-def draw_surfaces(ax, scn, xlim, ylim, marker_scale=1.0):
-    """Draw the solid around the transition (scenarios.Scenario.env), filled,
-    with its faces outlined."""
-    env = scn.env
-    for k, poly in enumerate(env.solid_polygons(xlim, ylim)):
-        # Opaque, so the pieces of an inside corner's solid overlap invisibly.
-        ax.add_patch(Polygon(np.array(poly), closed=True, facecolor="#e4e4e4", edgecolor="none",
-                             zorder=0, label="Solid" if k == 0 else None))
-    for k, (a, b) in enumerate(env.face_segments()):
-        ax.plot([a[0], b[0]], [a[1], b[1]], color="dimgray", lw=2, zorder=1,
-                label="Surface" if k == 0 else None)
-
-
-def _capsule_outline(a, b, r, n=24):
-    """Points around a capsule (segment a–b thickened by r), for drawing."""
-    d = b - a
-    angle = np.arctan2(d[1], d[0]) if np.linalg.norm(d) > 0 else 0.0
-    t1 = np.linspace(angle + np.pi / 2, angle + 3 * np.pi / 2, n)
-    t2 = np.linspace(angle - np.pi / 2, angle + np.pi / 2, n)
-    return np.vstack([a + r * np.stack([np.cos(t1), np.sin(t1)], axis=1),
-                      b + r * np.stack([np.cos(t2), np.sin(t2)], axis=1)])
-
-
-def draw_outline(ax, scn, q, p, marker_scale=1.0):
-    """Draw the robot's physical outline (constraints.py) — the shapes the
-    clearance rules are checked against — as thin outlines."""
-    chain, _ = forward_kinematics(q, p["x1"], p["y1"], p["theta1"], l1, l2, l3)
-    shapes = [(chain[i], chain[i + 1], JOINT_RADIUS, "steelblue") for i in range(3)]
-    for x, y, theta, side, color in ((p["x1"], p["y1"], p["theta1"], +1, "forestgreen"),
-                                     (p["x2"], p["y2"], p["theta2"], -1, "crimson")):
-        shapes += [(a, b, r, color) for a, b, r in assembly_parts(x, y, theta, scn.wg, side).values()]
-    for a, b, r, color in shapes:
-        ax.add_patch(Polygon(_capsule_outline(np.asarray(a), np.asarray(b), r), closed=True,
-                             fill=False, edgecolor=color, lw=0.6 * marker_scale, alpha=0.6, zorder=2))
-
-
-def draw_frame(ax, scn, q, p, xlim, ylim, title=None, marker_scale=1.0, show_labels=True):
-    """Draw one state of transition `scn` — joint angles q, assembly pose p:
-    environment, chain and both assemblies, with their physical outline."""
-    wg = scn.wg
-    draw_surfaces(ax, scn, xlim, ylim, marker_scale)
-    draw_outline(ax, scn, q, p, marker_scale)
-    plot_robot(q, p["x1"], p["y1"], p["theta1"], p["x2"], p["y2"], p["theta2"], l1, l2, l3,
-               axle_half_length=wg.bar_len, axle_a_len=wg.bar_len_a, wheel_radius=wg.wheel_r,
-               calf=wg.calf, arm_a1=wg.arm_a1, arm_b1=wg.arm_b1, arm_a2=wg.arm_a2, arm_b2=wg.arm_b2,
-               ax=ax, title=title, marker_scale=marker_scale, show_labels=show_labels)
-    ax.set_xlim(xlim)
-    ax.set_ylim(ylim)
-    ax.set_aspect("equal")
 
 
 def playback_speed(traj, fps=GIF_FPS, frame_step=GIF_FRAME_STEP):
@@ -271,7 +202,7 @@ if __name__ == "__main__":
         print(f"  → {len(issues)} issue(s) total")
 
     if "--no-render" not in sys.argv:
-        out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gifs")
+        out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "gifs")
         os.makedirs(out_dir, exist_ok=True)
         print("Rendering...")
         render_video(traj, os.path.join(out_dir, scn.output))

@@ -1,5 +1,5 @@
 """
-timing.py — speeds, limits and sampling shared by planning, solving and export.
+params.py — speeds, limits and sampling shared by planning, solving and export.
 
 All times are in seconds.  scenarios.py works out how long each phase of a
 transition lasts from the speeds below (and stretches a phase if the joints

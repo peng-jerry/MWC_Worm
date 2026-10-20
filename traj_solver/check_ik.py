@@ -1,7 +1,7 @@
 """
 check_ik.py — joint-angle quality report for the transition scenarios.
 
-Solves each scenario exactly as animate_transition.py does and reports the
+Solves each scenario exactly as animate.py does and reports the
 metrics that matter when the joint angles are played back on the motors:
 speed against the joint limit, smoothness, joint-limit and clearance
 margins, and whether every hard rule (constraints.py) holds.
@@ -16,7 +16,7 @@ baseline on the time samples both runs share (so a 6 fps run can be
 compared with a 3 fps baseline).  Save a new baseline whenever you accept
 a change; keyframe edits invalidate old comparisons.
 
-The sample rate comes from timing.py; override it per run with e.g.
+The sample rate comes from core/params.py; override it per run with e.g.
     TRAJ_SAMPLE_RATE=3 python check_ik.py
 """
 
@@ -27,12 +27,12 @@ import time
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from trajectory import solve_trajectory
-from constraints import (CLEARANCE_GROUPS, HARD_CLEARANCE, JOINT_HARD_LIMIT_DEG,
-                         JOINT_SOFT_LIMIT_DEG, SOFT_CLEARANCE)
-from kinematics import q_display
-from scenarios import SCENARIOS
-from timing import MAX_JOINT_SPEED
+from core.trajectory import solve_trajectory
+from core.constraints import (CLEARANCE_GROUPS, HARD_CLEARANCE, JOINT_HARD_LIMIT_DEG,
+                              JOINT_SOFT_LIMIT_DEG, SOFT_CLEARANCE)
+from core.kinematics import q_display
+from core.scenarios import SCENARIOS
+from core.params import MAX_JOINT_SPEED
 
 _DIR          = os.path.dirname(os.path.abspath(__file__))
 BASELINE_PATH = os.path.join(_DIR, "ik_baseline.npz")

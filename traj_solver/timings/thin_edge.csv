@@ -1,5 +1,5 @@
 # Thin edge (top to underside): timing file for Motor/playback.py
-# Written by traj_solver/robot_timing.py from solve e4a5ec0db13a880f
+# Written by traj_solver/export_timing.py from solve 8926364466902e1b
 # 265 waypoints, 6 per second, 44.000 s
 #
 # Columns
