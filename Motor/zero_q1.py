@@ -10,15 +10,20 @@ Controls:
   B button / Ctrl-C  → abort without changing the offset
 
 Jog until q1 is straight up, then press A.  Torque is disabled once the zero
-is captured.  After it succeeds, JOINT_OFFSET / Q1_OFFSET in homing.py /
-playback.py stay 0.0.
+is captured.  The BEAR's own homing_offset register is set so present_position
+reads 0 at that pose, matching the offset=0.0 default for q1 in
+traj_solver/motor_calibration.py (shared with homing.py / playback.py).
 """
 
 import sys
+import os
 import time
 import math
 
 from pybear import Manager
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "traj_solver"))
+from motor_calibration import JOINTS
 
 try:
     import evdev
@@ -34,7 +39,7 @@ PORT     = "/dev/serial/by-id/usb-Westwood_Robotics_USB2BEAR_Boosted_UB0104-if00
 BAUD     = 8_000_000
 Q1_ID    = 3
 
-GEAR_RATIO   = 30.0       # motor turns 30x per joint turn
+GEAR_RATIO   = JOINTS["q1"].ratio   # motor turns per joint turn (30:1 worm)
 JOG_VELOCITY = 0.15       # JOINT rad/s at full stick (~8.6°/s = 4.5 rad/s at the motor); partial stick is finer
 JOG_I_MAX    = 2.0        # A
 JOG_P_GAIN   = 3.0        # A per rad/s of velocity error — must be high enough to break joint stiction
