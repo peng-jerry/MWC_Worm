@@ -1,30 +1,15 @@
 """
-xbox_test.py — verify Xbox controller axes/buttons and BEAR motor responses.
+controller_test.py — verify Xbox controller axes/buttons.
 
 Run straight through with:
-    python xbox_test.py
+    python controller_test.py
 
 Tests in order:
-  1. Ping all active motors
-  2. Detect Xbox controller and list axes/buttons
-  3. Walk through each axis one at a time with prompts
-  4. Spin each motor briefly to confirm direction
-  5. Clean up (disable + close port)
+  1. Detect Xbox controller and list axes/buttons
+  2. Walk through each axis one at a time with prompts
 """
 
 import sys
-import os
-import math
-import time
-import select
-
-# ── PyBEAR path ───────────────────────────────────────────────────────────────
-_PYBEAR_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "WRBear_test-20260913T135535Z-1-001", "WRBear_test", "PyBEAR",
-)
-sys.path.insert(0, _PYBEAR_DIR)
-from pybear import Manager
 
 try:
     import evdev
@@ -35,31 +20,7 @@ except ImportError:
     import evdev
     from evdev import ecodes
 
-# ── Config — edit to match your setup ────────────────────────────────────────
-PORT = "/dev/serial/by-id/usb-Westwood_Robotics_USB2BEAR_Boosted_UB0104-if00-port0"
-BAUD = 8_000_000
-
-ROLE_TO_ID = {
-    "left_stick_speed":  3,
-    "right_stick_speed": 1,
-    "trigger_speed":     2,
-}
-
-SPIN_VELOCITY = 1.0   # rad/s used during motor spin test
-SPIN_DURATION = 0.8   # seconds each direction
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
-def read1(getter, motor_id):
-    data_list, err = getter(motor_id)[0]
-    return data_list[0], err
-
-def disable_all(bear, ids):
-    for mid in ids:
-        try:
-            bear.set_torque_enable((mid, 0))
-        except Exception:
-            pass
-
 def section(title):
     print(f"\n{'─'*60}")
     print(f"  {title}")
@@ -70,31 +31,9 @@ def warn(msg): print(f"  !  {msg}")
 def fail(msg): print(f"  ✗  {msg}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 1. Connect & ping
+# 1. Detect Xbox controller
 # ═══════════════════════════════════════════════════════════════════════════════
-section("1 / 5  Connect to BEAR bus and ping motors")
-
-bear = Manager.BEAR(port=PORT, baudrate=BAUD, single_timeout=0.05, single_try_num=3)
-active_ids = sorted(set(ROLE_TO_ID.values()))
-all_online = True
-
-for mid in active_ids:
-    _, err = bear.ping(mid)[0]
-    if err is None:
-        fail(f"BEAR {mid}: no response — check power and wiring")
-        all_online = False
-    else:
-        ok(f"BEAR {mid}: online")
-
-if not all_online:
-    print("\nOne or more motors offline. Fix connections and re-run.")
-    bear.close_port()
-    sys.exit(1)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 2. Detect Xbox controller
-# ═══════════════════════════════════════════════════════════════════════════════
-section("2 / 5  Detect Xbox controller")
+section("1 / 2  Detect Xbox controller")
 
 candidates = []
 for path in evdev.list_devices():
@@ -111,7 +50,6 @@ if not candidates:
         print(f"    {d.path}  {d.name!r}")
         d.close()
     print("\n  Plug in the controller and re-run.")
-    bear.close_port()
     sys.exit(1)
 
 joy = candidates[0]
@@ -143,9 +81,9 @@ else:
     ok("All expected axes present (ABS_Y, ABS_RX, ABS_Z, ABS_RZ)")
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 3. Axis isolation tests (one at a time)
+# 2. Axis isolation tests (one at a time)
 # ═══════════════════════════════════════════════════════════════════════════════
-section("3 / 5  Axis isolation tests")
+section("2 / 2  Axis isolation tests")
 print("  You will be prompted to move each control. Keep everything else still.")
 
 def read_all_abs():
@@ -188,59 +126,26 @@ for label, expected_code, instruction in tests:
 
 # B button test
 input("\n  Press and HOLD the B button, then press Enter...")
-if BTN_KILL in btn_codes:
+btn_ok = BTN_KILL in btn_codes
+if btn_ok:
     ok("B button code present in capabilities")
 else:
     warn("B button (BTN_EAST) not in capabilities — kill may not work")
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 4. Motor spin test
+# Summary
 # ═══════════════════════════════════════════════════════════════════════════════
-section("4 / 5  Motor spin test (velocity mode, brief)")
-print(f"  Each motor will spin at ±{SPIN_VELOCITY} rad/s for {SPIN_DURATION}s each direction.")
+section("Summary")
 
-input("\n  Press Enter when the robot is clear to move...")
+summary = [("Expected axes present", not missing)]
+for label, expected_code, _ in tests:
+    summary.append((label, axis_results.get(expected_code, False)))
+summary.append(("B button (BTN_EAST) present", btn_ok))
 
-MODE_VELOCITY = 1
+for label, passed in summary:
+    (ok if passed else fail)(label)
 
-for role, motor_id in ROLE_TO_ID.items():
-    print(f"\n  [{role}] BEAR {motor_id}")
-
-    bear.set_torque_enable((motor_id, 0))
-    bear.set_p_gain_id((motor_id, 0.358));  bear.set_i_gain_id((motor_id, 0.045));  bear.set_d_gain_id((motor_id, 0.0))
-    bear.set_p_gain_iq((motor_id, 0.358));  bear.set_i_gain_iq((motor_id, 0.045));  bear.set_d_gain_iq((motor_id, 0.0))
-    bear.set_p_gain_velocity((motor_id, 0.5)); bear.set_i_gain_velocity((motor_id, 0.0)); bear.set_d_gain_velocity((motor_id, 0.0))
-    bear.set_limit_i_max((motor_id, 2.0))
-    bear.set_limit_velocity_max((motor_id, max(SPIN_VELOCITY * 1.5, 2.0)))
-    bear.set_limit_position_min((motor_id, -16 * math.pi))
-    bear.set_limit_position_max((motor_id,  16 * math.pi))
-    bear.set_goal_velocity((motor_id, 0.0))
-    bear.set_mode((motor_id, MODE_VELOCITY))
-    bear.set_torque_enable((motor_id, 1))
-
-    # CW
-    print(f"    Spinning CW  (+{SPIN_VELOCITY} rad/s)...")
-    bear.set_goal_velocity((motor_id,  SPIN_VELOCITY))
-    time.sleep(SPIN_DURATION)
-
-    # CCW
-    print(f"    Spinning CCW (-{SPIN_VELOCITY} rad/s)...")
-    bear.set_goal_velocity((motor_id, -SPIN_VELOCITY))
-    time.sleep(SPIN_DURATION)
-
-    # Stop
-    bear.set_goal_velocity((motor_id, 0.0))
-    time.sleep(0.2)
-    bear.set_torque_enable((motor_id, 0))
-
-    vel, _ = read1(bear.get_present_velocity, motor_id)
-    ok(f"Stopped. Present velocity: {vel:+.3f} rad/s")
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 5. Cleanup
-# ═══════════════════════════════════════════════════════════════════════════════
-section("5 / 5  Cleanup")
-disable_all(bear, range(1, 4))
-bear.close_port()
-ok("All motors disabled, port closed.")
-print("\nAll tests complete.")
+if all(passed for _, passed in summary):
+    print("\nAll tests passed.")
+else:
+    print("\nSome tests failed — see ✗ items above.")
