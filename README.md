@@ -172,7 +172,7 @@ python check_ik.py
 python check_ik.py --save-baseline      # accept the current solution as the baseline
 
 # Checks of the geometry, rules and plans against hand-worked cases:
-python test_constraints.py
+python check_constraints.py
 
 # Another sample rate for one run:
 TRAJ_SAMPLE_RATE=3 python check_ik.py
@@ -221,7 +221,7 @@ traj_solver/
   export_timing.py       waypoint files for the robot  → timings/
   check_ik.py            joint-angle quality report against ik_baseline.npz
   check_playback.py      simulates Motor/playback.py and measures between waypoints
-  test_constraints.py    hand-worked checks of geometry, rules and plans
+  check_constraints.py   hand-worked checks of geometry, rules and plans
 
   core/                  the library — imported by the scripts, never run directly;
                          each module imports only from the ones above it

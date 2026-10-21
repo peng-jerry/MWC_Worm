@@ -1,5 +1,5 @@
 """
-test_constraints.py — checks of the geometry, environment and robot rules
+check_constraints.py — checks of the geometry, environment and robot rules
 against hand-worked cases.
 
 Each check builds a situation whose answer is known (a point a set distance
@@ -8,7 +8,7 @@ compares.  The plan of every transition is also sampled, which runs the
 plan's own checks (reach, assemblies vs surfaces and each other).
 
 Usage:
-    python test_constraints.py         (about 20 s)
+    python check_constraints.py        (about 20 s)
 Exits non-zero if any check fails.
 """
 
