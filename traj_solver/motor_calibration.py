@@ -71,8 +71,8 @@ JOINTS = {
 # The wheels, in the order of scenarios.WHEELS: arm A and arm B of the front
 # and back assemblies.  None = no motor.
 WHEELS = {
-    "front_a": Motor(),
+    "front_a": Motor(sign=-1),  # measured on the robot: CW (not CCW) when commanded positive
     "front_b": None,
-    "back_a":  Motor(),
+    "back_a":  Motor(),         # measured on the robot: CCW when commanded positive, matches default
     "back_b":  None,
 }

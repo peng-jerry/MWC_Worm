@@ -91,10 +91,10 @@ JOINT_LIMIT_MOTOR = 49.9
 ROLE_PARAMS = {
     "front_wheels": dict(limit_i_max=3.0, limit_velocity_max=4.0, invert=False, soft_limit=False),
     "back_wheels":  dict(limit_i_max=3.0, limit_velocity_max=4.0, invert=False, soft_limit=False),
-    # front_swerve/back_swerve: no calibrated range yet — same conservative
-    # defaults as the wheels, but with no soft limit, so be careful.
-    "front_swerve": dict(limit_i_max=3.0, limit_velocity_max=4.0, invert=False, soft_limit=False),
-    "back_swerve":  dict(limit_i_max=3.0, limit_velocity_max=4.0, invert=False, soft_limit=False),
+    # front_swerve/back_swerve: no calibrated range yet, and half the wheels'
+    # speed — no soft limit either, so be careful.
+    "front_swerve": dict(limit_i_max=3.0, limit_velocity_max=2.0, invert=False, soft_limit=False),
+    "back_swerve":  dict(limit_i_max=3.0, limit_velocity_max=2.0, invert=False, soft_limit=False),
     # q1-q4: slower than the wheels (6 rad/s at the motor ≈ 12°/s at the
     # joint) since these are chain joints on an unsupported robot, and they
     # get the soft limit.
@@ -126,7 +126,7 @@ TRIGGER_DEADZONE        = 0.05
 HEALTH_CHECK_EVERY_N    = 25     # ticks between torque_enable checks (~2×/sec at 50 Hz)
 DIAG_REFRESH_EVERY_N    = 5      # ticks between diagnostics-window refreshes (10×/sec at 50 Hz)
 
-# Axis mapping — update if xbox_test.py reports different codes
+# Axis mapping — update if tests/xbox_test.py reports different codes
 AXES = {
     "LEFT_Y":  ecodes.ABS_Y,
     "LEFT_X":  ecodes.ABS_X,

@@ -60,7 +60,9 @@ for i, mid in enumerate(range(lo, hi + 1)):
             print(".", end="", flush=True)
         continue
     found.append(mid)
-    print(f"\n  BEAR {mid:3d}: online   position={pos:+7.3f} rad   voltage={volt:5.2f} V", end="", flush=True)
+    pos_s  = f"{pos:+7.3f} rad" if pos is not None else "   n/a    "
+    volt_s = f"{volt:5.2f} V"   if volt is not None else " n/a "
+    print(f"\n  BEAR {mid:3d}: online   position={pos_s}   voltage={volt_s}", end="", flush=True)
 
 bear.close_port()
 

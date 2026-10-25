@@ -4,6 +4,9 @@ motor_test.py — verify BEAR motor bus connectivity and briefly move each motor
 Run straight through with:
     python motor_test.py
 
+Or test only specific motors (comma-separated BEAR IDs):
+    python motor_test.py 1,3,5
+
 Tests in order:
   1. Ping all 8 motors (skips any that are offline, since the robot may be
      mid-setup with only some motors wired)
@@ -21,7 +24,7 @@ import time
 
 # ── PyBEAR path ───────────────────────────────────────────────────────────────
 _PYBEAR_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
+    os.path.dirname(os.path.abspath(__file__)), "..",
     "WRBear_test-20260913T135535Z-1-001", "WRBear_test", "PyBEAR",
 )
 sys.path.insert(0, _PYBEAR_DIR)
@@ -47,9 +50,26 @@ ROLES = {
 
 WHEEL_SPIN_VELOCITY = 1.0    # rad/s — wheel spin test
 WHEEL_SPIN_DURATION = 0.8    # s each direction
-JOINT_NUDGE_VELOCITY = 0.3   # rad/s at the motor — slow, to limit how far an unsupported joint swings
+JOINT_NUDGE_VELOCITY = 2.0   # rad/s at the motor — enough to break stiction and read reliably
+JOINT_NUDGE_VELOCITY_OVERRIDE = {2: 1.0, 7: 1.0}   # front/back swerve — slower than the other joints
 JOINT_NUDGE_DURATION = 0.3   # s each direction — short, same reason
 MOVE_THRESHOLD = 0.25        # fraction of target velocity the motor must reach to pass
+
+if len(sys.argv) == 1:
+    SELECTED_IDS = set(ROLES)
+elif len(sys.argv) == 2:
+    try:
+        SELECTED_IDS = {int(x) for x in sys.argv[1].split(",")}
+    except ValueError:
+        print("Usage: python motor_test.py [id1,id2,...]   e.g. python motor_test.py 1,3,5")
+        sys.exit(1)
+    unknown = SELECTED_IDS - set(ROLES)
+    if unknown:
+        print(f"Unknown motor ID(s): {sorted(unknown)}  (known IDs: {sorted(ROLES)})")
+        sys.exit(1)
+else:
+    print("Usage: python motor_test.py [id1,id2,...]   e.g. python motor_test.py 1,3,5")
+    sys.exit(1)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def read1(getter, motor_id):
@@ -103,13 +123,15 @@ def fail(msg): print(f"  ✗  {msg}")
 # ═══════════════════════════════════════════════════════════════════════════════
 # 1. Connect & ping
 # ═══════════════════════════════════════════════════════════════════════════════
-section("1 / 3  Connect to BEAR bus and ping motors")
+section(f"1 / 3  Connect to BEAR bus and ping motors ({', '.join(str(m) for m in sorted(SELECTED_IDS))})")
 
 bear = Manager.BEAR(port=PORT, baudrate=BAUD, single_timeout=0.05, single_try_num=3)
 summary = []   # (label, passed)
 online_ids = []
 
 for mid, (role, _) in ROLES.items():
+    if mid not in SELECTED_IDS:
+        continue
     _, err = bear.ping(mid)[0]
     if err is None:
         warn(f"BEAR {mid} [{role}]: no response — skipping (offline or not wired yet)")
@@ -136,7 +158,7 @@ MODE_VELOCITY = 1
 
 for mid in online_ids:
     role, kind = ROLES[mid]
-    vel = WHEEL_SPIN_VELOCITY if kind == "wheel" else JOINT_NUDGE_VELOCITY
+    vel = WHEEL_SPIN_VELOCITY if kind == "wheel" else JOINT_NUDGE_VELOCITY_OVERRIDE.get(mid, JOINT_NUDGE_VELOCITY)
     dur = WHEEL_SPIN_DURATION if kind == "wheel" else JOINT_NUDGE_DURATION
 
     print(f"\n  [{role}] BEAR {mid} ({kind})")

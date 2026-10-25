@@ -18,7 +18,14 @@ time, in isolation:
      than one responds, something upstream is still sharing an ID.
   3. Disconnect it, wire in the next motor, repeat with the next ID.
   4. Once every motor has its final unique ID, reconnect the full chain and
-     re-run motor_test.py / a ping scan to confirm every ID responds together.
+     re-run tests/motor_test.py / a ping scan to confirm every ID responds together.
+
+`id` is a BEAR Configuration Register: a plain set_id() only changes it in
+RAM, and it reverts to the last saved value the next time the motor loses
+power. This script also calls save_config() so the new ID survives a power
+cycle — without it, reassigned motors silently revert (usually back to the
+factory default ID 1) the moment you power them off to move them into the
+final chain, which looks like "the motor just isn't there anymore".
 
 This only writes the id register — it does not touch gains, modes, or
 MOTOR_IDS in homing.py / playback.py / motor_calibration.py (update those
@@ -78,12 +85,25 @@ time.sleep(0.1)
 _, err_old = bear.ping(current_id)[0]
 pos, err_new = read1(bear.get_present_position, new_id)
 
-if err_new is not None and err_old is None:
-    print(f"Confirmed: motor now responds at ID {new_id} (present_position={pos:+.4f} rad) "
-          f"and no longer at ID {current_id}.")
+if not (err_new is not None and err_old is None):
+    print(f"WARNING: could not confirm the new ID (ID {new_id} err={err_new}, ID {current_id} err={err_old}). "
+          "Not saving — re-run the scan before trying again.")
+    bear.close_port()
+    sys.exit(1)
+
+print(f"Confirmed: motor now responds at ID {new_id} (present_position={pos:+.4f} rad) "
+      f"and no longer at ID {current_id}.")
+
+print("Saving to flash so the ID survives a power cycle...")
+bear.save_config(new_id)
+time.sleep(0.2)
+
+_, err_saved = bear.ping(new_id)[0]
+if err_saved is not None:
+    print(f"Saved and confirmed still responding at ID {new_id}.")
     print("Disconnect it, wire in the next motor, and run this script again with the next ID.")
 else:
-    print(f"WARNING: could not confirm the new ID (ID {new_id} err={err_new}, ID {current_id} err={err_old}). "
-          "Re-run the scan before trusting this motor's ID.")
+    print(f"WARNING: motor stopped responding at ID {new_id} after save_config — "
+          "check it didn't drop off the bus before trusting this motor's ID.")
 
 bear.close_port()
