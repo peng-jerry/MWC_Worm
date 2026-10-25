@@ -1,12 +1,16 @@
 """
-motor_test.py — verify BEAR motor bus connectivity and spin each motor.
+motor_test.py — verify BEAR motor bus connectivity and briefly move each motor.
 
 Run straight through with:
     python motor_test.py
 
 Tests in order:
-  1. Ping all active motors
-  2. Spin each motor briefly to confirm direction
+  1. Ping all 8 motors (skips any that are offline, since the robot may be
+     mid-setup with only some motors wired)
+  2. Move each online motor briefly, one at a time, with a confirm/skip
+     prompt before each — the robot sits unsupported on the ground, so
+     moving q1-q4 or the swerve motors can shift its balance or tip it.
+     Wheels get a normal spin test; joints/swerve get a slow, short nudge.
   3. Clean up (disable + close port)
 """
 
@@ -27,15 +31,25 @@ from pybear import Manager
 PORT = "/dev/serial/by-id/usb-Westwood_Robotics_USB2BEAR_Boosted_UB0104-if00-port0"
 BAUD = 8_000_000
 
-ROLE_TO_ID = {
-    "left_stick_speed":  3,
-    "right_stick_speed": 1,
-    "trigger_speed":     2,
+# BEAR ID -> (role, motor type).  "wheel" gets the normal spin test;
+# "joint" (chain joints + swerve) gets a much slower, shorter nudge, since an
+# unsupported robot can shift or tip when those move.
+ROLES = {
+    1: ("front wheels",  "wheel"),
+    2: ("front swerve",  "joint"),
+    3: ("q1",             "joint"),
+    4: ("q2",             "joint"),
+    5: ("q3",             "joint"),
+    6: ("q4",             "joint"),
+    7: ("back swerve",   "joint"),
+    8: ("back wheels",   "wheel"),
 }
 
-SPIN_VELOCITY = 1.0   # rad/s used during motor spin test
-SPIN_DURATION = 0.8   # seconds each direction
-MOVE_THRESHOLD = 0.25  # fraction of SPIN_VELOCITY the motor must reach to pass (velocity loop is slow to ramp)
+WHEEL_SPIN_VELOCITY = 1.0    # rad/s — wheel spin test
+WHEEL_SPIN_DURATION = 0.8    # s each direction
+JOINT_NUDGE_VELOCITY = 0.3   # rad/s at the motor — slow, to limit how far an unsupported joint swings
+JOINT_NUDGE_DURATION = 0.3   # s each direction — short, same reason
+MOVE_THRESHOLD = 0.25        # fraction of target velocity the motor must reach to pass
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def read1(getter, motor_id):
@@ -92,80 +106,89 @@ def fail(msg): print(f"  ✗  {msg}")
 section("1 / 3  Connect to BEAR bus and ping motors")
 
 bear = Manager.BEAR(port=PORT, baudrate=BAUD, single_timeout=0.05, single_try_num=3)
-active_ids = sorted(set(ROLE_TO_ID.values()))
-all_online = True
 summary = []   # (label, passed)
+online_ids = []
 
-for mid in active_ids:
+for mid, (role, _) in ROLES.items():
     _, err = bear.ping(mid)[0]
     if err is None:
-        fail(f"BEAR {mid}: no response — check power and wiring")
-        all_online = False
+        warn(f"BEAR {mid} [{role}]: no response — skipping (offline or not wired yet)")
     else:
-        ok(f"BEAR {mid}: online")
-    summary.append((f"BEAR {mid} ping", err is not None))
+        ok(f"BEAR {mid} [{role}]: online")
+        online_ids.append(mid)
+        summary.append((f"BEAR {mid} [{role}] ping", True))
 
-if not all_online:
-    print("\nOne or more motors offline. Fix connections and re-run.")
+if not online_ids:
+    print("\nNo motors responded. Check power and wiring.")
     bear.close_port()
     sys.exit(1)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 2. Motor spin test
+# 2. Motor move test
 # ═══════════════════════════════════════════════════════════════════════════════
-section("2 / 3  Motor spin test (velocity mode, brief)")
-print(f"  Each motor will spin at ±{SPIN_VELOCITY} rad/s for {SPIN_DURATION}s each direction.")
-
-input("\n  Press Enter when the robot is clear to move...")
+section("2 / 3  Motor move test (velocity mode, one motor at a time)")
+print(f"  Wheels: ±{WHEEL_SPIN_VELOCITY} rad/s for {WHEEL_SPIN_DURATION}s each direction.")
+print(f"  Joints/swerve: ±{JOINT_NUDGE_VELOCITY} rad/s (motor) for {JOINT_NUDGE_DURATION}s each direction — slow and short.")
+print("  The robot is unsupported on the ground — each motor is confirmed individually")
+print("  before it moves, and only one motor is enabled at a time.")
 
 MODE_VELOCITY = 1
 
-for role, motor_id in ROLE_TO_ID.items():
-    print(f"\n  [{role}] BEAR {motor_id}")
+for mid in online_ids:
+    role, kind = ROLES[mid]
+    vel = WHEEL_SPIN_VELOCITY if kind == "wheel" else JOINT_NUDGE_VELOCITY
+    dur = WHEEL_SPIN_DURATION if kind == "wheel" else JOINT_NUDGE_DURATION
 
-    if not disable_motor(bear, motor_id):
+    print(f"\n  [{role}] BEAR {mid} ({kind})")
+    note = "" if kind == "wheel" else " — may shift the robot's balance; brace it if needed"
+    resp = input(f"    Press Enter to test{note}, or 's' + Enter to skip: ").strip().lower()
+    if resp == "s":
+        warn("skipped")
+        continue
+
+    if not disable_motor(bear, mid):
         warn("torque disable unconfirmed — continuing anyway")
-    bear.set_p_gain_id((motor_id, 0.358));  bear.set_i_gain_id((motor_id, 0.045));  bear.set_d_gain_id((motor_id, 0.0))
-    bear.set_p_gain_iq((motor_id, 0.358));  bear.set_i_gain_iq((motor_id, 0.045));  bear.set_d_gain_iq((motor_id, 0.0))
-    bear.set_p_gain_velocity((motor_id, 0.5)); bear.set_i_gain_velocity((motor_id, 0.0)); bear.set_d_gain_velocity((motor_id, 0.0))
-    bear.set_limit_i_max((motor_id, 2.0))
-    bear.set_limit_velocity_max((motor_id, max(SPIN_VELOCITY * 1.5, 2.0)))
-    bear.set_limit_position_min((motor_id, -16 * math.pi))
-    bear.set_limit_position_max((motor_id,  16 * math.pi))
-    bear.set_goal_velocity((motor_id, 0.0))
-    mode_ok = set_mode_confirmed(bear, motor_id, MODE_VELOCITY)
+    bear.set_p_gain_id((mid, 0.358));  bear.set_i_gain_id((mid, 0.045));  bear.set_d_gain_id((mid, 0.0))
+    bear.set_p_gain_iq((mid, 0.358));  bear.set_i_gain_iq((mid, 0.045));  bear.set_d_gain_iq((mid, 0.0))
+    bear.set_p_gain_velocity((mid, 0.5)); bear.set_i_gain_velocity((mid, 0.0)); bear.set_d_gain_velocity((mid, 0.0))
+    bear.set_limit_i_max((mid, 2.0))
+    bear.set_limit_velocity_max((mid, max(vel * 1.5, 2.0)))
+    bear.set_limit_position_min((mid, -16 * math.pi))
+    bear.set_limit_position_max((mid,  16 * math.pi))
+    bear.set_goal_velocity((mid, 0.0))
+    mode_ok = set_mode_confirmed(bear, mid, MODE_VELOCITY)
     (ok if mode_ok else fail)("velocity mode " + ("confirmed" if mode_ok else "could not be confirmed"))
-    summary.append((f"BEAR {motor_id} velocity mode", mode_ok))
+    summary.append((f"BEAR {mid} [{role}] velocity mode", mode_ok))
 
-    enabled, en, en_err = enable_motor(bear, motor_id)
+    enabled, en, en_err = enable_motor(bear, mid)
     (ok if enabled else fail)(f"torque_enable readback = {en} (err={en_err})")
-    summary.append((f"BEAR {motor_id} torque enable", enabled))
+    summary.append((f"BEAR {mid} [{role}] torque enable", enabled))
 
     measured = {}
-    for label, vel in (("CW ", SPIN_VELOCITY), ("CCW", -SPIN_VELOCITY)):
-        print(f"    Spinning {label} ({vel:+.1f} rad/s)...")
-        bear.set_goal_velocity((motor_id, vel))
-        time.sleep(SPIN_DURATION)
-        pv, _ = read1(bear.get_present_velocity, motor_id)
-        cur, _ = read1(bear.get_present_iq, motor_id)
+    for label, v in (("CW ", vel), ("CCW", -vel)):
+        print(f"    Moving {label} ({v:+.2f} rad/s)...")
+        bear.set_goal_velocity((mid, v))
+        time.sleep(dur)
+        pv, _ = read1(bear.get_present_velocity, mid)
+        cur, _ = read1(bear.get_present_iq, mid)
         measured[label.strip()] = pv
         print(f"      present velocity {pv:+.3f} rad/s, iq {cur:+.3f} A")
-    moved = (measured["CW"] > MOVE_THRESHOLD * SPIN_VELOCITY) and (measured["CCW"] < -MOVE_THRESHOLD * SPIN_VELOCITY)
-    summary.append((f"BEAR {motor_id} spin CW/CCW", moved))
+    moved = (measured["CW"] > MOVE_THRESHOLD * vel) and (measured["CCW"] < -MOVE_THRESHOLD * vel)
+    summary.append((f"BEAR {mid} [{role}] move CW/CCW", moved))
 
     # Stop
-    bear.set_goal_velocity((motor_id, 0.0))
+    bear.set_goal_velocity((mid, 0.0))
     time.sleep(0.2)
-    bear.set_torque_enable((motor_id, 0))
+    bear.set_torque_enable((mid, 0))
 
-    vel, _ = read1(bear.get_present_velocity, motor_id)
-    ok(f"Stopped. Present velocity: {vel:+.3f} rad/s")
+    pv, _ = read1(bear.get_present_velocity, mid)
+    ok(f"Stopped. Present velocity: {pv:+.3f} rad/s")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 3. Cleanup
 # ═══════════════════════════════════════════════════════════════════════════════
 section("3 / 3  Cleanup")
-disable_all(bear, range(1, 4))
+disable_all(bear, ROLES.keys())
 bear.close_port()
 ok("All motors disabled, port closed.")
 

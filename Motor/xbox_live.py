@@ -1,5 +1,5 @@
 """
-xbox_live.py — live Xbox controller → BEAR velocity control.
+xbox_live.py — live Xbox controller → BEAR velocity control, all 8 motors.
 
 Run with:
     python xbox_live.py
@@ -8,11 +8,27 @@ Every run does a full disable → configure → enable sequence so the script
 can be stopped and restarted without power-cycling the motors.
 
 Control mapping:
-  Left stick  (up/down)    → left_stick_speed motor  (up = CW)
-  Right stick (left/right) → right_stick_speed motor (right = CW)
-  LT / RT triggers         → trigger_speed motor     (RT = CW, LT = CCW)
-  B button                 → emergency stop (disables all motors immediately)
-  Ctrl-C / terminal stop   → same cleanup via finally block
+  Left stick  up/down     → front wheels   (BEAR 1)   CW / CCW, proportional
+  Left stick  left/right  → front swerve   (BEAR 2)   CW / CCW, proportional
+  Right stick up/down     → back wheels    (BEAR 8)   CW / CCW, proportional
+  Right stick left/right  → back swerve    (BEAR 7)   CW / CCW, proportional
+  RT                      → q1 (BEAR 3)    CW, proportional to pull
+  RT + B                  → q1 (BEAR 3)    CCW, proportional to pull
+  LT                      → q4 (BEAR 6)    CCW, proportional to pull
+  LT + B                  → q4 (BEAR 6)    CW, proportional to pull
+  RB                      → q2 (BEAR 4)    CW, fixed speed while held
+  RB + B                  → q2 (BEAR 4)    CCW, fixed speed while held
+  LB                      → q3 (BEAR 5)    CCW, fixed speed while held
+  LB + B                  → q3 (BEAR 5)    CW, fixed speed while held
+  Start (the "≡" button)  → emergency stop (disables all motors immediately)
+  Ctrl-C / terminal stop  → same cleanup via finally block
+
+q1-q4 have a software soft limit (JOINT_LIMIT_MOTOR, from
+traj_solver/motor_calibration.py's q1-q4 ratio and the robot's ±95° joint
+range): this script runs every motor in VELOCITY mode, which BEAR does not
+position-limit on its own, so a command that would drive a joint further
+past the limit is zeroed instead of sent. front_swerve/back_swerve have no
+calibrated range yet, so they are NOT soft-limited — be careful with them.
 """
 
 import sys
@@ -45,33 +61,51 @@ BAUD = 8_000_000
 
 # Comment out any role whose motor isn't connected
 ROLE_TO_ID = {
-    "left_stick_speed":  3,
-    "right_stick_speed": 1,
-    "trigger_speed":     2,
+    "front_wheels": 1,
+    "front_swerve": 2,
+    "q1":           3,
+    "q2":           4,
+    "q3":           5,
+    "q4":           6,
+    "back_swerve":  7,
+    "back_wheels":  8,
 }
 
+# q1-q4 travel ±95° from straight up (±49.74 rad at the motor after the 30:1
+# worm). The BEAR silently ignores position-limit writes above ~50 rad
+# (measured on this hardware) and doesn't enforce limit_position in velocity
+# mode anyway, so this script enforces it itself in software.
+JOINT_LIMIT_MOTOR = 49.9
+
 ROLE_PARAMS = {
-    "left_stick_speed": dict(
-        limit_i_max        = 3.0,
-        limit_velocity_max = 4.0,
-        limit_position_min = -16 * math.pi,
-        limit_position_max =  16 * math.pi,
-        invert             = False,
-    ),
-    "right_stick_speed": dict(
-        limit_i_max        = 3.0,
-        limit_velocity_max = 4.0,
-        limit_position_min = -16 * math.pi,
-        limit_position_max =  16 * math.pi,
-        invert             = False,
-    ),
-    "trigger_speed": dict(
-        limit_i_max        = 2.0,
-        limit_velocity_max = 6.0,
-        limit_position_min = -16 * math.pi,
-        limit_position_max =  16 * math.pi,
-        invert             = False,
-    ),
+    "front_wheels": dict(limit_i_max=3.0, limit_velocity_max=4.0, invert=False, soft_limit=False),
+    "back_wheels":  dict(limit_i_max=3.0, limit_velocity_max=4.0, invert=False, soft_limit=False),
+    # front_swerve/back_swerve: no calibrated range yet — same conservative
+    # defaults as the wheels, but with no soft limit, so be careful.
+    "front_swerve": dict(limit_i_max=3.0, limit_velocity_max=4.0, invert=False, soft_limit=False),
+    "back_swerve":  dict(limit_i_max=3.0, limit_velocity_max=4.0, invert=False, soft_limit=False),
+    # q1-q4: slower than the wheels (6 rad/s at the motor ≈ 12°/s at the
+    # joint) since these are chain joints on an unsupported robot, and they
+    # get the soft limit.
+    "q1": dict(limit_i_max=1.5, limit_velocity_max=6.0, invert=False, soft_limit=True),
+    "q2": dict(limit_i_max=1.5, limit_velocity_max=6.0, invert=False, soft_limit=True),
+    "q3": dict(limit_i_max=1.5, limit_velocity_max=6.0, invert=False, soft_limit=True),
+    "q4": dict(limit_i_max=1.5, limit_velocity_max=6.0, invert=False, soft_limit=True),
+}
+
+# How each role is driven from the controller. "stick" is proportional, both
+# directions off one axis. "trigger" is proportional off one trigger, with
+# base_sign applied normally and alt_sign applied while BTN_MOD (B) is held.
+# "bumper" is the same idea but digital (full speed while the button is held).
+CONTROLS = {
+    "front_wheels": dict(kind="stick",  axis="LEFT_Y"),
+    "front_swerve": dict(kind="stick",  axis="LEFT_X"),
+    "back_wheels":  dict(kind="stick",  axis="RIGHT_Y"),
+    "back_swerve":  dict(kind="stick",  axis="RIGHT_X"),
+    "q1": dict(kind="trigger", axis="RT", base_sign=+1, alt_sign=-1),
+    "q4": dict(kind="trigger", axis="LT", base_sign=-1, alt_sign=+1),
+    "q2": dict(kind="bumper",  btn="RB",  base_sign=+1, alt_sign=-1),
+    "q3": dict(kind="bumper",  btn="LB",  base_sign=-1, alt_sign=+1),
 }
 
 CONTROL_HZ              = 50
@@ -81,11 +115,20 @@ TRIGGER_DEADZONE        = 0.05
 HEALTH_CHECK_EVERY_N    = 25     # ticks between torque_enable checks (~2×/sec at 50 Hz)
 
 # Axis mapping — update if xbox_test.py reports different codes
-AXIS_LEFT_Y  = ecodes.ABS_Y
-AXIS_RIGHT_X = ecodes.ABS_RX
-AXIS_LT      = ecodes.ABS_Z
-AXIS_RT      = ecodes.ABS_RZ
-BTN_KILL     = ecodes.BTN_EAST   # B button
+AXES = {
+    "LEFT_Y":  ecodes.ABS_Y,
+    "LEFT_X":  ecodes.ABS_X,
+    "RIGHT_Y": ecodes.ABS_RY,
+    "RIGHT_X": ecodes.ABS_RX,
+    "LT":      ecodes.ABS_Z,
+    "RT":      ecodes.ABS_RZ,
+}
+INVERTED_AXES = {"LEFT_Y", "RIGHT_Y"}   # raw value increases downward; flip so up = +1
+
+BTN_MOD  = ecodes.BTN_EAST    # B — direction modifier for RT/LT/RB/LB
+BTN_RB   = ecodes.BTN_TR
+BTN_LB   = ecodes.BTN_TL
+BTN_KILL = ecodes.BTN_START   # the "≡" / Menu button — emergency stop
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Helpers
@@ -126,8 +169,9 @@ class ControllerState:
     def __init__(self, dev):
         self.dev = dev
         caps = dev.capabilities(verbose=False)
+        axis_codes = set(AXES.values())
         self._absinfo = {c: dev.absinfo(c) for c, _ in caps.get(ecodes.EV_ABS, [])
-                         if c in (AXIS_LEFT_Y, AXIS_RIGHT_X, AXIS_LT, AXIS_RT)}
+                         if c in axis_codes}
         self.raw     = {c: 0 for c in self._absinfo}
         self.buttons = set()
 
@@ -147,22 +191,20 @@ class ControllerState:
                 else:
                     self.buttons.discard(event.code)
 
-    def stick(self, code, invert=False):
+    def stick(self, axis_name):
+        code = AXES[axis_name]
         info = self._absinfo[code]
         center = (info.max + info.min) / 2
         span   = (info.max - info.min) / 2
         v = (self.raw[code] - center) / span
-        if code == AXIS_LEFT_Y:
-            v = -v          # raw ABS_Y increases downward; flip so up = +1
-        if invert:
+        if axis_name in INVERTED_AXES:
             v = -v
         return _deadzone(v, STICK_DEADZONE)
 
-    def trigger(self, code, invert=False):
+    def trigger(self, axis_name):
+        code = AXES[axis_name]
         info = self._absinfo[code]
         v = (self.raw[code] - info.min) / (info.max - info.min)
-        if invert:
-            v = 1.0 - v
         return _deadzone(v, TRIGGER_DEADZONE, floor_zero=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -215,28 +257,29 @@ for role, motor_id in ROLE_TO_ID.items():
     bear.set_p_gain_velocity((motor_id, 0.5));   bear.set_i_gain_velocity((motor_id, 0.0));   bear.set_d_gain_velocity((motor_id, 0.0))
     bear.set_limit_i_max((motor_id, p["limit_i_max"]))
     bear.set_limit_velocity_max((motor_id, p["limit_velocity_max"]))
-    bear.set_limit_position_min((motor_id, p["limit_position_min"]))
-    bear.set_limit_position_max((motor_id, p["limit_position_max"]))
     bear.set_goal_velocity((motor_id, 0.0))
     set_mode_confirmed(bear, motor_id, MODE_VELOCITY)
     bear.set_torque_enable((motor_id, 1))
     print(f"  [{role}] BEAR {motor_id}: enabled — "
-          f"i_max={p['limit_i_max']} A, vel_max={p['limit_velocity_max']} rad/s")
+          f"i_max={p['limit_i_max']} A, vel_max={p['limit_velocity_max']} rad/s"
+          + ("  (soft-limited ±%.1f rad)" % JOINT_LIMIT_MOTOR if p["soft_limit"] else ""))
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Control loop
 # ══════════════════════════════════════════════════════════════════════════════
 print("\nControl loop running.")
-print("  Left stick up/down     → left_stick_speed motor")
-print("  Right stick left/right → right_stick_speed motor")
-print("  LT / RT triggers       → trigger_speed motor")
-print("  B button               → emergency stop")
-print("  Ctrl-C                 → safe exit\n")
+print("  Left stick  up/down / left/right → front wheels / front swerve")
+print("  Right stick up/down / left/right → back wheels / back swerve")
+print("  RT (+B)  → q1 CW (CCW)      LT (+B)  → q4 CCW (CW)")
+print("  RB (+B)  → q2 CW (CCW)      LB (+B)  → q3 CCW (CW)")
+print("  Start (≡ button)            → emergency stop")
+print("  Ctrl-C                      → safe exit\n")
 
 dt          = 1.0 / CONTROL_HZ
 last_status = 0.0
 tick        = 0
 last_warned = {}
+last_position = {role: None for role, p in ROLE_PARAMS.items() if p["soft_limit"]}
 
 try:
     while True:
@@ -244,7 +287,7 @@ try:
         ctrl.poll()
 
         if BTN_KILL in ctrl.buttons:
-            print("\nB pressed — emergency stop.")
+            print("\nStart pressed — emergency stop.")
             break
 
         if tick % HEALTH_CHECK_EVERY_N == 0:
@@ -255,26 +298,43 @@ try:
                           f"motor not healthy, skipping commands. Re-run script to re-enable.")
                 last_warned[role] = state
 
+        mod_held = BTN_MOD in ctrl.buttons
+
         for role, motor_id in ROLE_TO_ID.items():
             if last_warned.get(role, 1) != 1:
                 continue
             p = ROLE_PARAMS[role]
+            c = CONTROLS.get(role)
 
-            if role == "trigger_speed":
-                lt  = ctrl.trigger(AXIS_LT)
-                rt  = ctrl.trigger(AXIS_RT)
-                cmd = rt - lt
-            elif role == "left_stick_speed":
-                cmd = ctrl.stick(AXIS_LEFT_Y)
-            elif role == "right_stick_speed":
-                cmd = ctrl.stick(AXIS_RIGHT_X)
+            if c is None:
+                cmd = 0.0
+            elif c["kind"] == "stick":
+                cmd = ctrl.stick(c["axis"])
+            elif c["kind"] == "trigger":
+                sign = c["alt_sign"] if mod_held else c["base_sign"]
+                cmd = sign * ctrl.trigger(c["axis"])
+            elif c["kind"] == "bumper":
+                btn = BTN_RB if c["btn"] == "RB" else BTN_LB
+                sign = c["alt_sign"] if mod_held else c["base_sign"]
+                cmd = sign * (1.0 if btn in ctrl.buttons else 0.0)
             else:
                 cmd = 0.0
 
             if p["invert"]:
                 cmd = -cmd
 
-            bear.set_goal_velocity((motor_id, cmd * p["limit_velocity_max"]))
+            goal = cmd * p["limit_velocity_max"]
+
+            if p["soft_limit"]:
+                pos, _ = read1(bear.get_present_position, motor_id)
+                last_position[role] = pos
+                if pos is not None:
+                    if pos >= JOINT_LIMIT_MOTOR and goal > 0:
+                        goal = 0.0
+                    elif pos <= -JOINT_LIMIT_MOTOR and goal < 0:
+                        goal = 0.0
+
+            bear.set_goal_velocity((motor_id, goal))
 
         now = time.time()
         if now - last_status >= STATUS_INTERVAL_S:
@@ -282,7 +342,7 @@ try:
             parts = []
             for role, motor_id in ROLE_TO_ID.items():
                 v, _ = read1(bear.get_present_velocity, motor_id)
-                parts.append(f"{role}(id{motor_id}) {v:+.2f} rad/s")
+                parts.append(f"{role}(id{motor_id}) {v:+.2f}")
             print("\r" + "  ".join(parts) + "   ", end="", flush=True)
 
         tick += 1
@@ -294,7 +354,7 @@ except KeyboardInterrupt:
 
 finally:
     print("Disabling all motors...")
-    for motor_id in range(1, 4):    # always target 1-3, not just active roles
+    for motor_id in ROLE_TO_ID.values():
         try:
             bear.set_torque_enable((motor_id, 0))
         except Exception as e:
