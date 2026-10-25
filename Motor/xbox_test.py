@@ -1,8 +1,8 @@
 """
-controller_test.py — verify Xbox controller axes/buttons.
+xbox_test.py — verify Xbox controller axes/buttons.
 
 Run straight through with:
-    python controller_test.py
+    python xbox_test.py
 
 Tests in order:
   1. Detect Xbox controller and list axes/buttons

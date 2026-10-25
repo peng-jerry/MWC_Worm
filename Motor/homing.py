@@ -1,5 +1,5 @@
 """
-homing.py — move q1 (left-stick motor) to the starting pose defined in a timing CSV.
+homing.py — move the chain joints q1–q4 (BEAR 3–6) to the starting pose defined in a timing CSV.
 
 Usage:
     python homing.py floor_to_wall
@@ -7,9 +7,12 @@ Usage:
     python homing.py outside
     python homing.py thin_edge
 
-Uses POSITION mode on the q1 motor only.  The front_a wheel motor (right-stick
-motor, the only driven wheel in each assembly) has no start pose, so it is
-left untouched here — see playback.py for both.
+Uses POSITION mode on the four joint motors.  The wheels and swerves have no
+start pose, so they are left untouched here — see playback.py.
+
+The targets are absolute joint angles, so they only mean something once the
+joints are calibrated.  Until then, for bench tests place the robot in the
+start pose by hand and run playback.py with --start-pose instead.
 
 The CSV is in each motor's own units (motor positions, after the 30:1 worm);
 speeds, tolerances and printed angles here are at the joint, converted with
@@ -19,8 +22,8 @@ BEFORE RUNNING:
   1. Calibrate in traj_solver/motor_calibration.py — offset = the motor's
      reading with the joint at 0 (link straight up from the calf for q1/q4),
      plus direction sign — then re-run traj_solver/export_timing.py.
-     Read the offset with:  python -c "from pybear import Manager; b=Manager.BEAR('/dev/ttyUSB0',8000000); print(b.get_present_position(3))"
-  2. Confirm MOTOR_IDS matches your wiring (q1 = BEAR 3, the left-stick motor).
+     Read the offset with:  python -c "from pybear import Manager; b=Manager.BEAR('/dev/ttyUSB0',8000000); print(b.get_present_position(3, 4, 5, 6))"
+  2. Confirm MOTOR_IDS matches your wiring (q1–q4 = BEAR 3–6).
   3. Confirm PORT matches your serial port.
 """
 
@@ -42,35 +45,45 @@ from pybear import Manager
 _TRAJ_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "traj_solver")
 sys.path.insert(0, _TRAJ_DIR)
 from motor_calibration import JOINTS
-CAL = [JOINTS["q1"]]
+CAL = [JOINTS[f"q{j}"] for j in range(1, 5)]      # q1 → q4
 
 # ── Hardware config ───────────────────────────────────────────────────────────
-PORT       = "/dev/ttyUSB0"   # change to e.g. "COM9" on Windows
+PORT       = "/dev/serial/by-id/usb-Westwood_Robotics_USB2BEAR_Boosted_UB0104-if00-port0"   # as xbox_live.py
 BAUDRATE   = 8_000_000
 
-# Motor IDs for the homed joints: q1 = BEAR 3 (left-stick motor).
-# BEAR 1 (right-stick motor) drives the front_a wheel and is not homed.
-MOTOR_IDS  = [3]
+# Motor IDs for the homed joints q1 → q4.  The wheels (BEAR 1, 8) and swerves
+# (BEAR 2, 7) are not homed.
+MOTOR_IDS  = [3, 4, 5, 6]
 
 # ── Motion limits ─────────────────────────────────────────────────────────────
 HOMING_JOINT_SPEED = math.radians(10.8)   # rad/s at the joint (half the 21.6 °/s limit)
 IQ_MAX         = 1.5    # A — torque cap during homing
 STEP_DT        = 0.05   # s — command update interval
 
-# q1 travels ±95° from straight up (±49.74 rad at the motor after the 30:1 worm).
+# Joints travel ±95° from their zero (±49.74 rad at the motor after the 30:1 worm).
 # The BEAR silently ignores position-limit writes above ~50 rad (measured on
 # this hardware), so 49.9 rad is the largest safe ceiling.
 POS_LIMIT_MOTOR = 49.9
+
+# Speed and acceleration caps at the motor, set every run: the motor otherwise
+# keeps whatever the last script left (xbox_live.py sets BEAR 3's velocity cap
+# to 4.0 rad/s).
+VEL_MAX_MOTOR = math.radians(21.6) * CAL[0].ratio   # 11.3 rad/s: the 21.6 °/s joint limit
+                                                     # (traj_solver/core/params.py MAX_JOINT_SPEED)
+ACC_MAX_MOTOR = 20.0    # rad/s² — the ramp below starts at full homing speed; this eases
+                        # the motor up to it in ~0.3 s (playback.py allows more)
 
 # Position PID (same as set_position.py example)
 P_GAIN_POS = 5.0
 I_GAIN_POS = 0.0
 D_GAIN_POS = 0.2
-P_GAIN_IQ  = 0.02
-I_GAIN_IQ  = 0.02
+# Current-loop gains: BEAR SDK Table 6 for the Koala Muscle Build V2 (the values
+# xbox_live.py runs on the robot).
+P_GAIN_IQ  = 0.358
+I_GAIN_IQ  = 0.045
 D_GAIN_IQ  = 0.0
-P_GAIN_ID  = 0.02
-I_GAIN_ID  = 0.02
+P_GAIN_ID  = 0.358
+I_GAIN_ID  = 0.045
 D_GAIN_ID  = 0.0
 
 # Arrival tolerance
@@ -87,7 +100,7 @@ SCENARIO_NAMES = ["floor_to_wall", "wall_to_ceiling", "outside", "thin_edge"]
 
 
 def load_start_pose(scenario: str) -> list[float]:
-    """Return [q1] motor position (rad) from the first row of the timing CSV."""
+    """Return [q1, q2, q3, q4] motor positions (rad) from the first row of the timing CSV."""
     csv_path = os.path.join(_TIMINGS_DIR, f"{scenario}.csv")
     if not os.path.exists(csv_path):
         print(f"CSV not found: {csv_path}")
@@ -95,7 +108,7 @@ def load_start_pose(scenario: str) -> list[float]:
     with open(csv_path, newline="") as fh:
         reader = csv.DictReader(line for line in fh if not line.startswith("#"))
         row = next(reader)
-    return [float(row["q1_rad"])]
+    return [float(row[f"q{j}_rad"]) for j in range(1, 5)]
 
 
 def read1(getter, motor_id):
@@ -109,8 +122,8 @@ def read_positions(bear, ids: list[int]) -> list[float]:
 
 
 def joint_degrees(raw: list[float]) -> str:
-    """Motor positions as joint angles, e.g. 'q1=+12.3°'."""
-    return "  ".join(f"q1={math.degrees(c.angle(r)):+.1f}°" for c, r in zip(CAL, raw))
+    """Motor positions as joint angles, e.g. 'q1=+12.3°  q2=…'."""
+    return "  ".join(f"q{j + 1}={math.degrees(c.angle(r)):+.1f}°" for j, (c, r) in enumerate(zip(CAL, raw)))
 
 
 def interpolate(start: list[float], end: list[float], t: float) -> list[float]:
@@ -182,6 +195,8 @@ for mid in MOTOR_IDS:
     bear.set_i_gain_position((mid, I_GAIN_POS))
     bear.set_d_gain_position((mid, D_GAIN_POS))
     bear.set_limit_i_max((mid, IQ_MAX))
+    bear.set_limit_velocity_max((mid, VEL_MAX_MOTOR))
+    bear.set_limit_acc_max((mid, ACC_MAX_MOTOR))
     bear.set_limit_position_min((mid, -POS_LIMIT_MOTOR))
     bear.set_limit_position_max((mid, POS_LIMIT_MOTOR))
     lim_max, _ = read1(bear.get_limit_position_max, mid)
@@ -240,7 +255,7 @@ while True:
         break
     time.sleep(0.1)
 
-print("\nArrival error (joint): " + "  ".join(f"q1={math.degrees(e):.2f}°" for e in errors)
+print("\nArrival error (joint): " + "  ".join(f"q{j + 1}={math.degrees(e):.2f}°" for j, e in enumerate(errors))
       + f"  (at {joint_degrees(final_raw)}, target {joint_degrees(target_raw)})")
 for mid in MOTOR_IDS:
     iq, _ = read1(bear.get_present_iq, mid)
@@ -248,9 +263,9 @@ for mid in MOTOR_IDS:
     print(f"  BEAR {mid}: iq={iq:+.2f} A (cap {IQ_MAX} A), torque_enable={en}, err={err}")
 
 if all(e < ARRIVAL_TOL for e in errors):
-    print("Homing complete — q1 within tolerance.")
+    print("Homing complete — all joints within tolerance.")
 else:
-    print("WARNING: q1 outside tolerance. If iq is at the cap, raise IQ_MAX; "
+    print("WARNING: a joint is outside tolerance. If its iq is at the cap, raise IQ_MAX; "
           "if iq is low, check torque_enable/err above and motor_calibration.py's offset.")
 
 input("\nPress Enter to disable torque.")
