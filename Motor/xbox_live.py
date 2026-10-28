@@ -23,12 +23,19 @@ Control mapping:
   Start (the "≡" button)  → emergency stop (disables all motors immediately)
   Ctrl-C / terminal stop  → same cleanup via finally block
 
-q1-q4 have a software soft limit (JOINT_LIMIT_MOTOR, from
-traj_solver/motor_calibration.py's q1-q4 ratio and the robot's ±95° joint
-range): this script runs every motor in VELOCITY mode, which BEAR does not
-position-limit on its own, so a command that would drive a joint further
-past the limit is zeroed instead of sent. front_swerve/back_swerve have no
-calibrated range yet, so they are NOT soft-limited — be careful with them.
+Every motor runs in VELOCITY mode, and the BEAR still enforces its own
+limit_position_min/max there: driving past it latches a Joint Limit fault
+(error 144) and drops the motor into damping. So at startup every motor's
+limit is set to POS_LIMIT_MOTOR (±16π, the widest the BEAR accepts) rather
+than whatever it last had saved. That is ±96° at q1-q4 after the 30:1 worm,
+but only ~8 turns either way for a wheel, so a wheel driven continuously in
+one direction will eventually fault too.
+
+No motor is soft-limited: ROLE_PARAMS["soft_limit"] (JOINT_LIMIT_MOTOR, which
+would otherwise zero a command that drives q1-q4 past the robot's ±95° joint
+range) is off for every role, same as the wheels. Nothing in software stops
+q1-q4 from being driven past their physical range — be careful with all
+eight motors.
 
 Diagnostics window (diagnostics.py): one column per motor, front to back in
 two rows of four, with its status (OK / WARN / ERROR and why), controller
@@ -83,25 +90,32 @@ ROLE_TO_ID = {
 }
 
 # q1-q4 travel ±95° from straight up (±49.74 rad at the motor after the 30:1
-# worm). The BEAR silently ignores position-limit writes above ~50 rad
-# (measured on this hardware) and doesn't enforce limit_position in velocity
-# mode anyway, so this script enforces it itself in software.
+# worm). Used only by the (currently disabled) software soft limit.
 JOINT_LIMIT_MOTOR = 49.9
 
+# Position limit written to every motor at startup. 16π (50.27 rad) is the
+# largest value the BEAR accepts — anything above it is silently ignored and
+# the motor keeps its old limit (BEAR 3 and 6 were holding ±3π, which is what
+# tripped q1/q4's Joint Limit faults at ~9.44 rad).
+POS_LIMIT_MOTOR = 16 * math.pi
+
+MODE_VELOCITY = 1
+
 ROLE_PARAMS = {
-    "front_wheels": dict(limit_i_max=3.0, limit_velocity_max=4.0, invert=False, soft_limit=False),
-    "back_wheels":  dict(limit_i_max=3.0, limit_velocity_max=4.0, invert=False, soft_limit=False),
-    # front_swerve/back_swerve: no calibrated range yet, and half the wheels'
-    # speed — no soft limit either, so be careful.
+    "front_wheels": dict(limit_i_max=3.0, limit_velocity_max=8.0, invert=False, soft_limit=False),
+    "back_wheels":  dict(limit_i_max=3.0, limit_velocity_max=8.0, invert=False, soft_limit=False),
+    # front_swerve/back_swerve: no calibrated range yet, and a quarter of the
+    # wheels' speed — no soft limit either, so be careful.
     "front_swerve": dict(limit_i_max=3.0, limit_velocity_max=2.0, invert=False, soft_limit=False),
     "back_swerve":  dict(limit_i_max=3.0, limit_velocity_max=2.0, invert=False, soft_limit=False),
     # q1-q4: slower than the wheels (6 rad/s at the motor ≈ 12°/s at the
-    # joint) since these are chain joints on an unsupported robot, and they
-    # get the soft limit.
-    "q1": dict(limit_i_max=1.5, limit_velocity_max=6.0, invert=True, soft_limit=True),
-    "q2": dict(limit_i_max=1.5, limit_velocity_max=6.0, invert=False, soft_limit=True),
-    "q3": dict(limit_i_max=1.5, limit_velocity_max=6.0, invert=True, soft_limit=True),
-    "q4": dict(limit_i_max=1.5, limit_velocity_max=6.0, invert=False, soft_limit=True),
+    # joint) since these are chain joints on an unsupported robot. No soft
+    # limit, same as the wheels — nothing stops these from being driven past
+    # the joint's physical ±95° range.
+    "q1": dict(limit_i_max=1.5, limit_velocity_max=6.0, invert=True, soft_limit=False),
+    "q2": dict(limit_i_max=1.5, limit_velocity_max=6.0, invert=False, soft_limit=False),
+    "q3": dict(limit_i_max=1.5, limit_velocity_max=6.0, invert=True, soft_limit=False),
+    "q4": dict(limit_i_max=1.5, limit_velocity_max=6.0, invert=False, soft_limit=False),
 }
 
 # How each role is driven from the controller. "stick" is proportional, both
@@ -268,11 +282,17 @@ print(f"  Controller: {joy.name}  ({joy.path})")
 
 ctrl = ControllerState(joy)
 
-# Always disable first so re-runs don't fight a previously-enabled motor,
-# and so any latching fault (e.g. a Joint Limit tripped by an earlier
-# homing.py/playback.py run) is actually cleared before we re-enable.
-print("\nDisabling all motors before configure...")
+# Widen every motor's position limit first, then disable: a disable only
+# clears a latched Joint Limit fault once the motor is back inside its limit,
+# and it also keeps re-runs from fighting a previously-enabled motor.
+print("\nSetting position limits and disabling all motors before configure...")
 for mid in active_ids:
+    bear.set_limit_position_min((mid, -POS_LIMIT_MOTOR))
+    bear.set_limit_position_max((mid, POS_LIMIT_MOTOR))
+    lim_lo, _ = read1(bear.get_limit_position_min, mid)
+    lim_hi, _ = read1(bear.get_limit_position_max, mid)
+    if lim_lo is None or lim_hi is None or abs(lim_hi - POS_LIMIT_MOTOR) > 1e-3 or abs(lim_lo + POS_LIMIT_MOTOR) > 1e-3:
+        print(f"  WARNING: BEAR {mid} kept position limits [{lim_lo}, {lim_hi}] instead of ±{POS_LIMIT_MOTOR:.3f}")
     cleared, err = disable_and_clear(bear, mid)
     if cleared:
         print(f"  BEAR {mid}: disabled, no fault")
@@ -281,7 +301,6 @@ for mid in active_ids:
               f"did not clear — this motor may still be faulted. Power-cycling it is the reliable fix.")
 
 print("\nConfiguring velocity mode...")
-MODE_VELOCITY = 1
 for role, motor_id in ROLE_TO_ID.items():
     p = ROLE_PARAMS[role]
     bear.set_p_gain_id((motor_id, 0.358));       bear.set_i_gain_id((motor_id, 0.045));       bear.set_d_gain_id((motor_id, 0.0))
@@ -289,8 +308,10 @@ for role, motor_id in ROLE_TO_ID.items():
     bear.set_p_gain_velocity((motor_id, 0.5));   bear.set_i_gain_velocity((motor_id, 0.0));   bear.set_d_gain_velocity((motor_id, 0.0))
     bear.set_limit_i_max((motor_id, p["limit_i_max"]))
     bear.set_limit_velocity_max((motor_id, p["limit_velocity_max"]))
+    # goal_velocity is only accepted in velocity mode, so switch mode first.
+    if not set_mode_confirmed(bear, motor_id, MODE_VELOCITY):
+        print(f"  WARNING: could not confirm velocity mode on BEAR {motor_id}")
     bear.set_goal_velocity((motor_id, 0.0))
-    set_mode_confirmed(bear, motor_id, MODE_VELOCITY)
     bear.set_torque_enable((motor_id, 1))
     print(f"  [{role}] BEAR {motor_id}: enabled — "
           f"i_max={p['limit_i_max']} A, vel_max={p['limit_velocity_max']} rad/s"
