@@ -13,13 +13,13 @@ thickened by a radius (a wheel is a capsule of zero length).
              per side), so the links' ends are the joints.
   assembly   for each wheel assembly (front at P0, back at P3):
                calf             chain joint → V-apex
-               block            the black block across the calf
-               plate            the top of the wheel plate
+               motor            the motor across the calf
                arm A, arm B     V-apex → each wheel
                wheel A, wheel B
              The calf, arms and wheels follow WheelGeometry, so a
              rearranged arm layout carries its outline with it.  Part
-             widths were read off the CAD side view (constants below).
+             widths were read off the CAD side view; every dimension is
+             in robot.py.
 
 What can touch what (from the robot's construction)
 ---------------------------------------------------
@@ -27,15 +27,19 @@ What can touch what (from the robot's construction)
     l1–l2, l2–l3, and l1 / l3 with the calf they are mounted on.
   * l1 and l3 collide.  Their ends are the joints, so this also covers
     every pair of joints that can meet.
-  * Every link collides with every other part of either assembly.
+  * Every link collides with every other part of either assembly.  A link
+    is measured against its own assembly (l1 the front, l3 the back) only
+    beyond its mount joint, from the edge of the joint housing (JOINT_RADIUS
+    along the link): the joint is fixed to that assembly, so its own gap to
+    the assembly's parts never changes and says nothing about the motion.
   * The two assemblies collide with each other and with the surfaces.
     Both assemblies are placed by the motion plan, so that is checked
-    there (scenarios.check_assemblies), not per configuration.
+    there (planner.check_assemblies), not per configuration.
   * Parts on opposite faces of a plate cannot reach each other through it:
     their gap is measured around the plate (environment.separation).
 
-Rules for one configuration (evaluate)
---------------------------------------
+Rules for one configuration (evaluate; the limits are in params.py)
+--------------------------------------------------------------------
   hard   clearance ≥ HARD_CLEARANCE: chain ↔ surfaces, l1 ↔ l3, links ↔
          either assembly
          |joint| ≤ JOINT_HARD_LIMIT_DEG (display convention)
@@ -52,63 +56,15 @@ from typing import Tuple
 import numpy as np
 
 from .kinematics import q_display
+from ..params import (FEASIBILITY_TOL, HARD_CLEARANCE, JOINT_HARD_LIMIT_DEG, JOINT_SOFT_LIMIT_DEG,
+                     SOFT_CLEARANCE)
+from ..robot import (ARM_A_RADIUS, ARM_B_RADIUS, CALF_RADIUS, JOINT_RADIUS, MOTOR_DEPTH,
+                    MOTOR_HEIGHT, MOTOR_WIDTH, WheelGeometry)
 
 
 # ------------------------------------------------------------------ #
-#  Wheel assembly geometry                                            #
+#  Wheel assemblies (dimensions in robot.py)                          #
 # ------------------------------------------------------------------ #
-
-# Measured assembly dimensions (side view, theta=0, both wheels on the floor):
-#
-#              spine axis (chain joint)
-#                  |
-#                  |  calf
-#                  |
-#                V-apex
-#               /   \
-#        arm B /     \ arm A
-#        45°  /       \
-#           (B)-------(A)
-#            |<-63.0->|<-20.19->|   (apex is 20.19 mm behind wheel A)
-#            |<----- 83.19 ---->|
-#
-# SPINE_HEIGHT is spine axis → wheel-centre line; the V-apex sits
-# APEX_HEIGHT above the wheel centres, the calf covers the rest.
-SPINE_HEIGHT = 0.17685                              # spine axis to wheel centre (m)
-WHEELBASE    = 0.08319                              # wheel centre-to-centre (m)
-ARM_A_DX     = 0.02019                              # V-apex to arm A wheel, horizontal (m)
-ARM_B_ANGLE  = np.pi / 4                            # arm B elevation at its wheel (45°)
-ARM_B_DX     = WHEELBASE - ARM_A_DX                 # V-apex to arm B wheel, horizontal (0.063 m)
-APEX_HEIGHT  = ARM_B_DX * np.tan(ARM_B_ANGLE)       # V-apex above wheel centres (0.063 m)
-CALF_LEN     = SPINE_HEIGHT - APEX_HEIGHT           # 0.11385 m
-BAR_LEN_A    = np.hypot(ARM_A_DX, APEX_HEIGHT)      # ≈ 0.06616 m
-BAR_LEN_B    = np.hypot(ARM_B_DX, APEX_HEIGHT)      # ≈ 0.08910 m
-ARM_A_OFFSET = np.arctan2(ARM_A_DX, APEX_HEIGHT)    # ≈ 17.77° from vertical
-ARM_B_OFFSET = np.arctan2(ARM_B_DX, APEX_HEIGHT)    # = 45°   from vertical
-
-
-@dataclass
-class WheelGeometry:
-    """Physical dimensions of the wheel assemblies."""
-    bar_len:   float = BAR_LEN_B  # arm B length from V-apex to wheel centre
-    wheel_r:   float = 0.025      # wheel radius (50 mm diameter)
-    # Per-assembly arm offsets from centreline c = theta − π/2.
-    # Wheel direction from axle = c + arm_angle.  Positive → +x at θ=0; negative → −x.
-    # Arm A and arm B always lean to opposite sides of the centreline.
-    arm_a1: float = -ARM_A_OFFSET    # front assembly, arm A (~−17.8°, outboard at θ=0)
-    arm_b1: float =  ARM_B_OFFSET    # front assembly, arm B (+45°, inboard at θ=0)
-    arm_a2: float =  ARM_A_OFFSET    # back assembly,  arm A (~+17.8°, outboard at θ=0)
-    arm_b2: float = -ARM_B_OFFSET    # back assembly,  arm B (−45°, inboard at θ=0)
-    calf:   float = CALF_LEN     # strut from chain joint to V-apex (perpendicular to theta)
-    bar_len_a: float = BAR_LEN_A # arm A length; pass None to auto-derive from bar_len/arm_b1/arm_a1
-
-    def __post_init__(self):
-        if self.bar_len_a is None:
-            # arm_a length that puts the arm_a wheel at the same surface height as
-            # arm_b at theta=0 (equal y-projection → simultaneous floor contact):
-            #   bar_len_a * cos(arm_a1) = bar_len * cos(arm_b1)
-            self.bar_len_a = self.bar_len * abs(np.cos(self.arm_b1)) / abs(np.cos(self.arm_a1))
-
 
 def wheel_centers(
     cx: float, cy: float, theta: float, wg: WheelGeometry, side: int = 1
@@ -132,18 +88,8 @@ def wheel_centers(
 
 
 # ------------------------------------------------------------------ #
-#  Physical outline (side view, from the CAD model)                   #
+#  Physical outline (part sizes in robot.py)                          #
 # ------------------------------------------------------------------ #
-
-JOINT_RADIUS = 0.015      # m; links are drawn and checked as 30 mm-wide capsules
-CALF_RADIUS  = 0.016      # m; calf 32 mm wide
-# Bars across the calf: (depth of their centre line below the chain joint,
-# half the length of that line, radius).  Overall size in the comments.
-BLOCK = (0.071, 0.020, 0.017)   # black block: 74 × 34 mm, 54–88 mm below the joint
-PLATE = (0.108, 0.015, 0.018)   # top of the wheel plate: 66 × 36 mm, 90–126 mm below
-ARM_A_RADIUS = 0.018      # m; the wheel plate along arm A, 36 mm wide
-ARM_B_RADIUS = 0.010      # m; arm B, 20 mm wide
-
 
 def assembly_parts(x, y, theta, wg: WheelGeometry, side: int) -> dict:
     """
@@ -156,14 +102,15 @@ def assembly_parts(x, y, theta, wg: WheelGeometry, side: int) -> dict:
     apex = joint + wg.calf * down
     wheel_a, wheel_b = wheel_centers(x, y, theta, wg, side)
 
-    def bar(depth, half, radius):
-        centre = joint + depth * down
-        return centre - half * across, centre + half * across, radius
+    def bar(depth, width, height):
+        """A part across the calf, centred `depth` below the chain joint: a capsule
+        `height` thick whose rounded ends are part of its overall `width`."""
+        centre, half = joint + depth * down, (width - height) / 2
+        return centre - half * across, centre + half * across, height / 2
 
     return {
         "calf":    (joint, apex, CALF_RADIUS),
-        "block":   bar(*BLOCK),
-        "plate":   bar(*PLATE),
+        "motor":   bar(MOTOR_DEPTH, MOTOR_WIDTH, MOTOR_HEIGHT),
         "arm A":   (apex, wheel_a, ARM_A_RADIUS),
         "arm B":   (apex, wheel_b, ARM_B_RADIUS),
         "wheel A": (wheel_a, wheel_a, wg.wheel_r),
@@ -188,20 +135,7 @@ def chain_points(Q, x1, y1, theta1, l1, l2, l3):
 #  Limits                                                             #
 # ------------------------------------------------------------------ #
 
-# Joint limits in the display convention (kinematics.q_display: q1/q4 0° =
-# link straight up from the calf, q2/q3 0° = straight).  Set only here —
-# the solver, the playback check, check_ik.py and the plots all use these.
-JOINT_SOFT_LIMIT_DEG = 90.0    # beyond this the solver pays a growing cost
-JOINT_HARD_LIMIT_DEG = 110.0   # never exceeded (the ±110° stop also keeps
-                               # each motor off the calf)
-
-# Gap between the outlines of any two parts that can collide, and between
-# the chain and the surfaces.
-HARD_CLEARANCE = 0.015    # m, never less
-SOFT_CLEARANCE = 0.050    # m, less than this costs
-
-FEASIBILITY_TOL = 1e-3    # m or rad by which a hard rule may be missed (rounding)
-
+# The joint and clearance limits themselves are in params.py.
 CLEARANCE_GROUPS = ("surface", "l1-l3", "front assembly", "back assembly")
 
 
@@ -259,7 +193,7 @@ def evaluate(Q, pose, env, wg: WheelGeometry, l1, l2, l3) -> Evaluation:
 
     pose  dict with the assemblies' chain joints and orientations x1, y1,
           theta1 (front) and x2, y2, theta2 (back), as from
-          scenarios.sample_poses.  The candidates are expected to close the
+          planner.sample_poses.  The candidates are expected to close the
           chain (chain_ik.solve_branch_batch), so both assemblies are placed
           from the pose.
     env   environment.Environment of the transition
@@ -273,13 +207,19 @@ def evaluate(Q, pose, env, wg: WheelGeometry, l1, l2, l3) -> Evaluation:
         "surface": env.clearance(starts, ends, r).min(axis=1),
         "l1-l3":   env.separation(p0, p1, p2, p3, within=SOFT_CLEARANCE + 2 * r) - 2 * r,
     }
-    for group, x, y, theta, side, own_link in (
-            ("front assembly", pose["x1"], pose["y1"], pose["theta1"], +1, 0),
-            ("back assembly",  pose["x2"], pose["y2"], pose["theta2"], -1, 2)):
+    # Against its own assembly a link starts at the edge of its mount joint's
+    # housing (see the module docstring): l1 leaves P0, l3 leaves P3.
+    starts_front = starts.copy()
+    starts_front[:, 0] = p0 + (JOINT_RADIUS / l1) * (p1 - p0)
+    ends_back = ends.copy()
+    ends_back[:, 2] = p3 - (JOINT_RADIUS / l3) * (p3 - p2)
+    for group, x, y, theta, side, a, b, own_link in (
+            ("front assembly", pose["x1"], pose["y1"], pose["theta1"], +1, starts_front, ends, 0),
+            ("back assembly",  pose["x2"], pose["y2"], pose["theta2"], -1, starts, ends_back, 2)):
         parts = assembly_parts(x, y, theta, wg, side)
         pa, pb, pr = (np.array([part[i] for part in parts.values()]) for i in range(3))
         # Every link against every part at once: (K, 3 links, P parts).
-        gap = env.separation(starts[:, :, None], ends[:, :, None], pa, pb,
+        gap = env.separation(a[:, :, None], b[:, :, None], pa, pb,
                              within=SOFT_CLEARANCE + r + pr) - r - pr
         gap[:, own_link, list(parts).index("calf")] = np.inf    # a link passes its own calf
         clearance[group] = gap.min(axis=(1, 2))

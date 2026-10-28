@@ -11,11 +11,16 @@ Cache
 -----
 A solve takes from about 2 s (inside corners) to 20 s (outside corner, thin
 edge) and every script needs the same result, so each solved transition is
-saved in traj_solver/.cache/.  Its key is built from the transition's name,
-the sample rate, the numpy and scipy versions, and the source of this module
-and every module of this package (core/) it imports, directly or indirectly
-(found by reading the imports, so a new module is picked up automatically).  Any change to the code or the
-parameters therefore changes the key, and a stale result is never reused.
+saved in traj_solver/.cache/.  Its key is built from
+  * the transition's definition (every field of its Scenario, so editing an
+    entry in core/scenarios.py counts),
+  * the sample rate and the numpy and scipy versions, and
+  * the source of this module and of every module of the core package it
+    imports, directly or indirectly — in core/engine/ and core/ alike, so
+    robot.py and params.py count (found by reading the imports, so a new
+    module is picked up automatically).
+Any change to the code, the parameters or the transition therefore changes
+the key, and a stale result is never reused.
 Older entries for the same transition and rate are deleted when a new one is
 saved.
 
@@ -34,19 +39,19 @@ import numpy as np
 import scipy
 
 from .kinematics import q_display
-from .params import SAMPLE_RATE, PLAN_JOINT_SPEED
-from .scenarios import (Scenario, l1, l2, l3, plan_phases, phase_starts, sample_poses,
+from ..params import MAX_RETIMES, PLAN_JOINT_SPEED, RETIME_TOLERANCE, SAMPLE_RATE
+from ..robot import l1, l2, l3
+from .planner import (Scenario, plan_phases, phase_starts, sample_poses,
                         cruise_posture, follow_gap)
 from .trajectory_ik import solve_trajectory_dp
 
-_DIR = os.path.dirname(os.path.abspath(__file__))
-CACHE_DIR = os.path.join(os.path.dirname(_DIR), ".cache")    # traj_solver/.cache, beside the scripts
+_PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # core/
+_PACKAGE = __name__.split(".")[0]                                           # "core"
+CACHE_DIR = os.path.join(os.path.dirname(_PACKAGE_DIR), ".cache")           # traj_solver/.cache
 
 # A phase is slowed down when a joint exceeds PLAN_JOINT_SPEED by more than
 # RETIME_TOLERANCE in it, as the robot plays it (_phase_peak_speeds); the
-# trajectory is then solved again, at most MAX_RETIMES times.
-RETIME_TOLERANCE = 0.005
-MAX_RETIMES = 5
+# trajectory is then solved again, at most MAX_RETIMES times (both in params.py).
 
 
 @dataclass
@@ -55,13 +60,13 @@ class Trajectory:
     A solved transition, one entry per frame.
 
     times    (N,) seconds
-    poses    assembly poses per frame (dicts, see scenarios.sample_poses)
+    poses    assembly poses per frame (dicts, see planner.sample_poses)
     Q        (N, 4) joint angles (rad)
     infos    per-frame diagnostics (trajectory_ik.solve_trajectory_dp)
     phases   the phases with their final durations
     retimes  how many times phases were slowed down for the joint speed limit
     gap      gap (m) the partner aims to keep while following a pivot, or None when
-             it parks (scenarios.follow_gap)
+             it parks (planner.follow_gap)
     key      the cache key: identifies the code and parameters that made it
     cached   True when it was loaded from the cache instead of solved
 
@@ -167,38 +172,54 @@ def _solve(scn, rate):
 #  Cache                                                              #
 # ------------------------------------------------------------------ #
 
+def _module_file(module):
+    """The source file of `module` (a dotted name such as "core.engine.planner")
+    if it is part of the core package, else None (numpy, scipy, … or a name
+    imported from a module rather than a module)."""
+    parts = module.split(".")
+    if parts[0] != _PACKAGE:
+        return None
+    path = os.path.join(_PACKAGE_DIR, *parts[1:])
+    for candidate in (path + ".py", os.path.join(path, "__init__.py")):
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def _solver_sources():
-    """{module name: source bytes} for this module and every module of this
-    package it imports, directly or indirectly.  Relative imports
-    (from .scenarios import …, from . import scenarios) and absolute ones
-    (from core.scenarios import …, import core.scenarios) are both followed."""
-    pkg = __package__                                   # "core"
-    sources, todo = {}, [os.path.splitext(os.path.basename(__file__))[0]]
+    """
+    {module name: source bytes} for this module and every module of the core
+    package it imports, directly or indirectly: relative imports of any depth
+    (from .planner import …, from ..params import …, from . import x) and
+    absolute ones (from core.robot import …, import core.robot) alike.
+    """
+    sources, todo = {}, [__name__]
     while todo:
         name = todo.pop()
-        if name in sources:
+        path = _module_file(name)
+        if name in sources or path is None:
             continue
-        with open(os.path.join(_DIR, name + ".py"), "rb") as fh:
+        with open(path, "rb") as fh:
             sources[name] = fh.read()
+        package = name if path.endswith("__init__.py") else name.rpartition(".")[0]
         for node in ast.walk(ast.parse(sources[name])):
             if isinstance(node, ast.Import):
-                names = [a.name for a in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                names = [node.module]
-            elif isinstance(node, ast.ImportFrom) and node.level == 1:
-                names = ([f"{pkg}.{node.module}"] if node.module
-                         else [f"{pkg}.{a.name}" for a in node.names])
-            else:
-                continue
-            local = [n[len(pkg) + 1:] for n in names if n.startswith(pkg + ".")]
-            todo += [n for n in local if os.path.exists(os.path.join(_DIR, n + ".py"))]
+                todo += [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:                    # relative: climb level − 1 packages from here
+                    base = package.split(".")[:len(package.split(".")) - (node.level - 1)]
+                    module = ".".join(base + ([node.module] if node.module else []))
+                else:
+                    module = node.module
+                # The module itself, and each imported name in case it is a submodule.
+                todo += [module] + [f"{module}.{a.name}" for a in node.names]
     return sources
 
 
 def cache_key(scn, rate=SAMPLE_RATE):
     """The cache key for transition `scn` sampled at `rate` (see the module docstring)."""
     h = hashlib.sha256()
-    for part in (scn.name, repr(float(rate)), np.__version__, scipy.__version__):
+    for part in (repr(scn), repr(float(rate)), np.__version__, scipy.__version__):
         h.update(part.encode() + b"\0")
     for name, src in sorted(_solver_sources().items()):
         h.update(name.encode() + b"\0" + src + b"\0")
@@ -256,8 +277,8 @@ def solve_trajectory(scn, rate=SAMPLE_RATE):
     parameters are unchanged since it was last solved.
 
     At an outside corner or edge the follow gap is chosen first
-    (scenarios.follow_gap).  The phases are then timed from the wheel and
-    pivot speeds alone (scenarios.plan_phases).  If the solved joints must
+    (planner.follow_gap).  The phases are then timed from the wheel and
+    pivot speeds alone (planner.plan_phases).  If the solved joints must
     move faster than params.PLAN_JOINT_SPEED in some phase — as the robot
     plays them, between waypoints too — that phase is lengthened in
     proportion and the trajectory is solved again.

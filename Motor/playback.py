@@ -5,7 +5,7 @@ driven wheels, and the two swerve motors.
 Usage:
     python playback.py <scenario>                 joint positions from the calibration table
     python playback.py <scenario> --start-pose    bench test before calibration (see below)
-    scenarios: floor_to_wall, wall_to_ceiling, outside, thin_edge
+    scenarios: any transition with a file in traj_solver/timings/
 
 Motors (BEAR IDs, as wired):
   q1 3, q2 4, q3 5, q4 6          POSITION mode, follow q*_rad / dq*_rad_s along cubic
@@ -18,7 +18,7 @@ Motors (BEAR IDs, as wired):
                                   xbox_live.py).
 
 Without --start-pose, run homing.py first: the joints are driven to the file's
-absolute angles, which need calibrated zeros (traj_solver/motor_calibration.py).
+absolute angles, which need calibrated zeros (traj_solver/core/motor_calibration.py).
 
 --start-pose: until the joints are calibrated their motor readings mean nothing
 absolute.  With this flag, place the robot by hand in the transition's start
@@ -27,7 +27,7 @@ reading as the file's first row, so every joint moves relative to where it
 really is.  Nothing in motor_calibration.py changes; it is only as accurate as
 the placement and applies to this run only.
 
-Each CSV row is a waypoint at time time_s (traj_solver/export_timing.py).
+Each CSV row is a waypoint at time time_s (traj_solver/generate/export_timing.py).
 Every 1/INTERP_HZ seconds the script sends each joint the point at that
 moment on the cubic through its position and speed at the two surrounding
 waypoints:
@@ -36,7 +36,7 @@ waypoints:
 
 with α ∈ [0, 1] the fraction of the way from waypoint k to k+1 and T the time
 between them.  The curve passes exactly through every waypoint with the
-waypoint's speed.  traj_solver/check_playback.py simulates the same curves.
+waypoint's speed.  traj_solver/checks/check_playback.py simulates the same curves.
 
 The CSV is in each motor's own units (motor positions after each joint's 30:1
 worm; wheel directions from their signs in motor_calibration.py), so values are
@@ -71,8 +71,8 @@ from pybear import Manager
 
 from diagnostics import STATS, ERROR_BITS, read_stats, decode_code
 
-# ── Motor calibration (shared with traj_solver/export_timing.py) ──────────────
-_TRAJ_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "traj_solver")
+# ── Motor calibration (shared with traj_solver/generate/export_timing.py) ─────
+_TRAJ_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "traj_solver", "core")
 sys.path.insert(0, _TRAJ_DIR)
 from motor_calibration import JOINTS
 
@@ -147,7 +147,9 @@ _TIMINGS_DIR = os.path.join(
     "..", "traj_solver", "timings",
 )
 
-SCENARIO_NAMES = ["floor_to_wall", "wall_to_ceiling", "outside", "thin_edge"]
+# Every transition with a timing file: traj_solver/generate/export_timing.py writes one for
+# each entry of traj_solver/core/scenarios.py, so a new transition needs no change here.
+SCENARIO_NAMES = sorted(os.path.splitext(f)[0] for f in os.listdir(_TIMINGS_DIR) if f.endswith(".csv"))
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Helpers
@@ -190,7 +192,7 @@ def hermite(q_k, dq_k, q_k1, dq_k1, T, alpha):
     """
     Cubic Hermite position at normalised time alpha in [0, 1]: the cubic that
     starts at q_k with speed dq_k and ends T seconds later at q_k1 with speed
-    dq_k1.  Same formula as traj_solver/check_playback.py.
+    dq_k1.  Same formula as traj_solver/checks/check_playback.py.
     """
     a2, a3 = alpha * alpha, alpha * alpha * alpha
     h00, h10 = 2 * a3 - 3 * a2 + 1, a3 - 2 * a2 + alpha

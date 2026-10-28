@@ -2,7 +2,7 @@
 plot_phases.py — show each transition at its phase boundaries.
 
 Usage:
-    python plot_phases.py [scenario | all]     default: all
+    python generate/plot_phases.py [scenario ...]     default: all (-h for help)
 
 For each transition, draws a panel taken from the solved trajectory for the
 start, then one for the end of each phase (approach, pivot, roll clear, roll
@@ -23,17 +23,21 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from core.drawing import draw_frame, plot_limits
-from core.trajectory import solve_trajectory
-from core.kinematics import q_display
+# traj_solver/ (this script's parent folder) on the path, so `core` imports from anywhere.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.engine.cli import output_dir, parse_args
+from core.engine.drawing import draw_frame, plot_limits
+from core.engine.kinematics import q_display
+from core.engine.trajectory import solve_trajectory
 from core.scenarios import SCENARIOS
 
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUT_DIR = os.path.join(_SCRIPT_DIR, "outputs", "phases")
+OUT_DIR = output_dir("phases")
 
 
 def plot(name, out_dir=OUT_DIR):
+    """Solve transition `name` (or load it from the cache), save the grid of
+    phase-boundary panels to out_dir/<name>.png and print each panel's joint
+    angles; returns the path."""
     scn = SCENARIOS[name]
     traj = solve_trajectory(scn)
     xlim, ylim = plot_limits(traj)
@@ -73,10 +77,11 @@ def plot(name, out_dir=OUT_DIR):
     return out
 
 
-if __name__ == "__main__":
-    arg = sys.argv[1] if len(sys.argv) > 1 else "all"
-    if arg != "all" and arg not in SCENARIOS:
-        print(f"Unknown scenario '{arg}'. Choose: {list(SCENARIOS)} or 'all'")
-        sys.exit(1)
-    for name in (SCENARIOS if arg == "all" else [arg]):
+def main():
+    names, _ = parse_args(__doc__)
+    for name in names:
         plot(name)
+
+
+if __name__ == "__main__":
+    main()

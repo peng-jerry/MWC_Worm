@@ -24,7 +24,7 @@ Control mapping:
   Ctrl-C / terminal stop  → same cleanup via finally block
 
 q1-q4 have a software soft limit (JOINT_LIMIT_MOTOR, from
-traj_solver/motor_calibration.py's q1-q4 ratio and the robot's ±95° joint
+traj_solver/core/motor_calibration.py's q1-q4 ratio and the robot's ±95° joint
 range): this script runs every motor in VELOCITY mode, which BEAR does not
 position-limit on its own, so a command that would drive a joint further
 past the limit is zeroed instead of sent. front_swerve/back_swerve have no

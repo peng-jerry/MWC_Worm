@@ -2,20 +2,19 @@
 plot_speeds.py — wheel speed, joint angle and joint speed plots for one transition.
 
 Usage:
-    python plot_speeds.py [floor_to_wall|wall_to_ceiling|outside|thin_edge]
-    (default floor_to_wall)
+    python generate/plot_speeds.py [scenario ...]     default: all (-h for help)
 
 Solves the transition exactly as animate.py does and plots, against
 time, with the phase boundaries marked:
   1. wheel motor speed of all four wheels — relative to the wheel's
      assembly, as in the timing files (rad/s, CCW positive;
-     scenarios.wheel_speeds) — with the rolling-speed limit
+     planner.wheel_speeds) — with the rolling-speed limit
      SLIDE_SPEED / wheel radius.  A wheel with no motor (the arm B wheels,
      motor_calibration.WHEELS) is shown at 0 while it is in the air:
      wheel_speeds ramps an airborne wheel to its landing speed, which only a
      driven wheel can do
   2. joint angles q1–q4 (display convention) with the soft and hard joint
-     limits from constraints.py
+     limits from params.py
   3. joint speeds (°/s) with the joint speed limit
 
 Writes outputs/speeds/<scenario>.png.
@@ -29,25 +28,29 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from core.trajectory import solve_trajectory
-from core.constraints import JOINT_HARD_LIMIT_DEG, JOINT_SOFT_LIMIT_DEG
-from core.kinematics import q_display
-from core.scenarios import SCENARIOS, wheel_speeds, wheels_touching
-from core.params import MAX_JOINT_SPEED, SLIDE_SPEED
-from motor_calibration import WHEELS as WHEEL_MOTORS
+# traj_solver/ (this script's parent folder) on the path, so `core` imports from anywhere.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.engine.cli import output_dir, parse_args
+from core.engine.kinematics import q_display
+from core.engine.planner import wheel_speeds, wheels_touching
+from core.engine.trajectory import solve_trajectory
+from core.motor_calibration import WHEELS as WHEEL_MOTORS
+from core.params import JOINT_HARD_LIMIT_DEG, JOINT_SOFT_LIMIT_DEG, MAX_JOINT_SPEED, SLIDE_SPEED
+from core.scenarios import SCENARIOS
 
-OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "speeds")
+OUT_DIR = output_dir("speeds")
 
 
 def plot(name, out_dir=OUT_DIR):
+    """Solve transition `name` (or load it from the cache) and save its three
+    panels to out_dir/<name>.png; returns the path."""
     scn = SCENARIOS[name]
     traj = solve_trajectory(scn)
     t = traj.times
     _, spin = wheel_speeds(scn, traj.phases, t)
-    free = np.array([m is None for m in WHEEL_MOTORS.values()])     # same order as scenarios.WHEELS
+    free = np.array([m is None for m in WHEEL_MOTORS.values()])     # same order as planner.WHEELS
     spin = np.where(free & ~wheels_touching(scn, traj.phases, t), 0.0, spin)
-    qs =np.degrees(np.unwrap(np.array([q_display(q) for q in traj.Q]), axis=0))
+    qs = np.degrees(np.unwrap(np.array([q_display(q) for q in traj.Q]), axis=0))
     dqs = np.diff(qs, axis=0) / np.diff(t)[:, None]          # °/s over each step
     t_mid = 0.5 * (t[1:] + t[:-1])
 
@@ -115,9 +118,11 @@ def plot(name, out_dir=OUT_DIR):
     return out
 
 
+def main():
+    names, _ = parse_args(__doc__)
+    for name in names:
+        plot(name)
+
+
 if __name__ == "__main__":
-    name = sys.argv[1] if len(sys.argv) > 1 else "floor_to_wall"
-    if name not in SCENARIOS:
-        print(f"Unknown scenario '{name}'. Choose: {list(SCENARIOS)}")
-        sys.exit(1)
-    plot(name)
+    main()

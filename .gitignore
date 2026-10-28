@@ -2,3 +2,4 @@ old/
 __pycache__/
 *.pyc
 traj_solver/.cache/
+Motor/logs/

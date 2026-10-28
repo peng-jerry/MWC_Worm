@@ -1,17 +1,22 @@
 """
 core — the trajectory solver as a library.  Nothing here is run directly:
-the scripts in traj_solver/ import it.
+the scripts (traj_solver/build_all.py, generate/, checks/) import it.
 
-Each module imports only from the ones listed above it:
+Everything you might change is in this folder; the code that uses it is in
+engine/, which should not need editing.
 
-  geometry.py        2-D segment and capsule distance tests
-  environment.py     the solid around a transition: clearance, distance through free space
-  kinematics.py      forward kinematics, display convention
-  constraints.py     robot outline (CAD), WheelGeometry, hard and soft rules (evaluate)
-  params.py          sample rate, speed limits, ramp time
-  chain_ik.py        closes the chain exactly for given q1 values (one frame)
-  scenarios.py       the four transitions: surfaces, phases, follow gap, wheel speeds
-  trajectory_ik.py   joint angles for every frame at once, by dynamic programming
-  trajectory.py      solve_trajectory: sampling, retiming, the solve cache
-  drawing.py         matplotlib drawing of a transition and the robot
+  robot.py       every dimension of the robot: links, wheel assemblies, arm
+                 layouts, part sizes
+  params.py      every setting you tune: sampling, speeds, joint and clearance
+                 limits, the motion plan every transition shares, the solver's
+                 weights and search resolution
+  scenarios.py   the transitions, one entry each, and how to add one
+  motor_calibration.py
+                 each motor's zero offset, direction and gear ratio (also
+                 read by Motor/); only the timing files depend on it
+
+  engine/        the implementation (see engine/__init__.py)
+
+robot.py, params.py and motor_calibration.py import nothing else from core; scenarios.py builds its
+entries with engine.planner.Scenario.
 """

@@ -37,6 +37,8 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Motor:
+    """One motor's calibration (see the module docstring) and the conversions
+    between joint or wheel values and the motor's own readings."""
     offset: float = 0.0     # rad
     sign: int = +1
     ratio: float = 1.0
@@ -68,7 +70,7 @@ JOINTS = {
     "q4": Motor(ratio=JOINT_WORM_RATIO),
 }
 
-# The wheels, in the order of scenarios.WHEELS: arm A and arm B of the front
+# The wheels, in the order of planner.WHEELS: arm A and arm B of the front
 # and back assemblies.  None = no motor.
 WHEELS = {
     "front_a": Motor(sign=-1),  # measured on the robot: CW (not CCW) when commanded positive

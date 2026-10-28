@@ -75,7 +75,9 @@ import numpy as np
 
 from .chain_ik import solve_branch_batch, posture_cost
 from .constraints import evaluate
-from .kinematics import forward_kinematics
+from .kinematics import forward_kinematics, wrap
+from ..params import (BAND_FACTOR, COARSE_GRID, MARGIN_WEIGHT, POSTURE_WEIGHT, SHARP_PASS,
+                      SMOOTH_WEIGHT, WIDE_CONVERGED, WIDE_PASS, WIDE_REPEATS)
 
 # Hard rules: violations dominate every other cost term.
 INFEASIBLE_COST     = 1e6   # per frame whose configuration breaks a hard rule
@@ -84,25 +86,11 @@ STEP_VIOLATION_COST = 1e6   # per transition in which any joint exceeds max_step
 STEP_EXCESS_WEIGHT  = 1e8   # per radian beyond max_step, to rank unavoidable violations
 PIN_WEIGHT          = 1e6   # coarse pass: draw a pinned frame to its grid point nearest the pin
 
-# Soft terms, per second of motion (see the module docstring).
-MARGIN_WEIGHT  = 1000.0     # soft score 1 = one clearance or joint at its hard limit
-SMOOTH_WEIGHT  = 1.0        # 1 = one joint moving at the planned speed limit
-POSTURE_WEIGHT = 1e-3       # per rad² from the neutral posture; a tie-breaker only
-
-# Search resolution.
-COARSE_GRID    = 360          # coarse q1 grid points over 2π (1° cells)
-BAND_FACTOR    = 3.0          # coarse: largest q1 change per frame considered, × max_step
-WIDE_PASS      = (3.0, 61)    # (half-width in cells, points): ±3 cells at 0.1-cell spacing
-WIDE_REPEATS   = 8            # most wide passes
-WIDE_CONVERGED = 0.01         # wide passes stop once no frame's q1 moves more (cells)
-SHARP_PASS     = (0.15, 31)   # ±0.15 cell at 0.01-cell spacing
+# The soft-term weights (MARGIN_WEIGHT, SMOOTH_WEIGHT, POSTURE_WEIGHT) and the
+# search resolution (COARSE_GRID … SHARP_PASS) are tunable, so they are set in
+# params.py.  The costs above are not: they only need to dwarf every soft term.
 
 _SIGNS = (+1.0,)              # elbow branches searched; +1 gives q3 <= 0 (see the module docstring)
-
-
-def _wrap(a):
-    """Wrap angles to [-π, π)."""
-    return (a + np.pi) % (2 * np.pi) - np.pi
 
 
 def _pose_args(pose):
@@ -116,7 +104,8 @@ def _pose_args(pose):
 # ------------------------------------------------------------------ #
 
 class _Problem:
-    """What every cost needs: the environment, robot and timing."""
+    """What every cost needs: the environment, robot and timing (dt: seconds
+    between frames; max_step: largest joint step allowed between frames, rad)."""
 
     def __init__(self, env, wg, l1, l2, l3, dt, max_step):
         self.env, self.wg, self.links = env, wg, (l1, l2, l3)
@@ -143,7 +132,7 @@ class _Problem:
         Cost of moving from configurations Qa to Qb (any broadcastable shapes
         ending in 4).  NaN where either side is NaN; callers treat NaN as inf.
         """
-        dq = _wrap(Qb - Qa)
+        dq = wrap(Qb - Qa)
         excess = np.sum(np.maximum(np.abs(dq) - self.max_step, 0.0), axis=-1)
         rate = dq / self.max_step                    # joint speed ÷ planned speed limit
         return (self.dt * SMOOTH_WEIGHT * np.sum(rate * rate, axis=-1)
@@ -164,7 +153,7 @@ def _pinned_candidate(q_pin, pose, l1, l2, l3, k):
         q = solve_branch_batch(np.array([q_pin[0]]), s, *_pose_args(pose), l1, l2, l3)[0]
         if np.isnan(q[0]):
             continue
-        err = float(np.abs(_wrap(q - q_pin)).max())
+        err = float(np.abs(wrap(q - q_pin)).max())
         if best is None or err < best[0]:
             best = (err, s, q)
     if best is None or best[0] > 1e-6:
@@ -218,7 +207,7 @@ def _coarse_pass(poses, prob, n_grid, pins):
                                else ev.violations(int(np.argmin(ev.violation))),
         })
         if k in pins:
-            dist = np.sum(_wrap(Q[k].reshape(-1, 4) - pins[k]) ** 2, axis=1)
+            dist = np.sum(wrap(Q[k].reshape(-1, 4) - pins[k]) ** 2, axis=1)
             cost = cost + PIN_WEIGHT * np.where(ok, dist, 0.0)
         node[k] = cost.reshape(nb, M)
 
@@ -317,10 +306,10 @@ def _frame_info(Q, poses, signs, diag, prob):
         positions, theta_end = forward_kinematics(q, pose["x1"], pose["y1"], pose["theta1"],
                                                   l1, l2, l3)
         pos_err = float(np.hypot(positions[-1][0] - pose["x2"], positions[-1][1] - pose["y2"]))
-        ang_err = float(abs(_wrap(theta_end - pose["theta2"])))
+        ang_err = float(abs(wrap(theta_end - pose["theta2"])))
         step_excess = 0.0
         if k > 0:
-            step_excess = float(max(0.0, np.abs(_wrap(q - Q[k - 1])).max() - prob.max_step))
+            step_excess = float(max(0.0, np.abs(wrap(q - Q[k - 1])).max() - prob.max_step))
         infos.append({
             "residual_norm":     float(np.hypot(pos_err, ang_err)),
             "position_error":    pos_err,
@@ -352,7 +341,7 @@ def solve_trajectory_dp(poses, env, wg, l1, l2, l3, *, dt, max_step,
     Parameters
     ----------
     poses : list of dict
-        Assembly poses per frame (scenarios.sample_poses): x1, y1, theta1,
+        Assembly poses per frame (planner.sample_poses): x1, y1, theta1,
         x2, y2, theta2.
     env : environment.Environment
         The solid around the transition.
