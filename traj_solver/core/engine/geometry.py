@@ -21,6 +21,7 @@ def cross(u, v):
 
 
 def dot(u, v):
+    """Dot product u · v over the last axis."""
     return u[..., 0] * v[..., 0] + u[..., 1] * v[..., 1]
 
 

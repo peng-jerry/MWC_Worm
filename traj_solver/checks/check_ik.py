@@ -7,17 +7,17 @@ speed against the joint limit, smoothness, joint-limit and clearance
 margins, and whether every hard rule (constraints.py) holds.
 
 Usage:
-    python check_ik.py [scenario ...]                  default: all scenarios
-    python check_ik.py [scenario ...] --save-baseline  also store the joint
+    python checks/check_ik.py [scenario ...]                  default: all (-h for help)
+    python checks/check_ik.py [scenario ...] --save-baseline  also store the joint
                                                        angles in ik_baseline.npz
 
 Without --save-baseline, each scenario is also compared with the stored
 baseline on the time samples both runs share (so a 6 fps run can be
 compared with a 3 fps baseline).  Save a new baseline whenever you accept
-a change; keyframe edits invalidate old comparisons.
+a change; a change of a phase's length leaves no samples in common.
 
 The sample rate comes from core/params.py; override it per run with e.g.
-    TRAJ_SAMPLE_RATE=3 python check_ik.py
+    TRAJ_SAMPLE_RATE=3 python checks/check_ik.py
 """
 
 import os
@@ -26,18 +26,19 @@ import time
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from core.trajectory import solve_trajectory
-from core.constraints import (CLEARANCE_GROUPS, HARD_CLEARANCE, JOINT_HARD_LIMIT_DEG,
-                              JOINT_SOFT_LIMIT_DEG, SOFT_CLEARANCE)
-from core.kinematics import q_display
+# traj_solver/ (this script's parent folder) on the path, so `core` imports from anywhere.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.engine.cli import parse_args
+from core.engine.constraints import CLEARANCE_GROUPS
+from core.engine.kinematics import q_display
+from core.engine.trajectory import solve_trajectory
+from core.params import (HARD_CLEARANCE, JOINT_HARD_LIMIT_DEG, JOINT_SOFT_LIMIT_DEG, MAX_JOINT_SPEED,
+                         SOFT_CLEARANCE)
 from core.scenarios import SCENARIOS
-from core.params import MAX_JOINT_SPEED
 
-_DIR          = os.path.dirname(os.path.abspath(__file__))
-BASELINE_PATH = os.path.join(_DIR, "ik_baseline.npz")
+BASELINE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ik_baseline.npz")   # beside this script
 
-SOFT_DEG = JOINT_SOFT_LIMIT_DEG   # display-convention joint limits (constraints.py)
+SOFT_DEG = JOINT_SOFT_LIMIT_DEG   # display-convention joint limits (params.py)
 HARD_DEG = JOINT_HARD_LIMIT_DEG
 MOVE_DEG = 0.05    # steps smaller than this count as stationary when counting reversals
 
@@ -115,6 +116,8 @@ def _shared_samples(cur, base):
 
 
 def report(scenario, traj, m, seconds, baseline):
+    """Print the metrics m of one solved transition, and its difference from
+    the baseline when there is one for it."""
     n = len(traj)
     phases = ", ".join(f"{p.name} {p.duration:.1f}" for p in traj.phases)
     print(f"\n=== {scenario}   ({traj.times[-1]:.1f} s, {n} frames at {traj.rate:g} Hz, "
@@ -131,7 +134,7 @@ def report(scenario, traj, m, seconds, baseline):
           f"> {HARD_DEG:.0f}°: {m['hard']}   q2/q3 > 0: {m['sign']}")
     print(f"  margin score        {m['margin']:.3g} over the run, max {m['margin_max']:.3g} per frame "
           f"(clearance and joint margins; 1 = one at its hard limit)")
-    print(f"  smallest clearance  " + ", ".join(f"{g} {v * 1000:.0f} mm" for g, v in m["clearance"].items())
+    print("  smallest clearance  " + ", ".join(f"{g} {v * 1000:.0f} mm" for g, v in m["clearance"].items())
           + f"   (hard {HARD_CLEARANCE * 1000:.0f}, soft {SOFT_CLEARANCE * 1000:.0f} mm)")
     print(f"  hard violations     {len(m['violated'])}/{n} frames{_term_summary(m['violated'])}")
     print(f"  pose infeasible     {len(m['blocked'])}/{n} frames (no configuration meets "
@@ -148,12 +151,11 @@ def report(scenario, traj, m, seconds, baseline):
 
 
 def main():
-    save      = "--save-baseline" in sys.argv
-    scenarios = [a for a in sys.argv[1:] if not a.startswith("--")] or list(SCENARIOS)
-    unknown   = [s for s in scenarios if s not in SCENARIOS]
-    if unknown:
-        print(f"Unknown scenario(s) {unknown}. Choose from {list(SCENARIOS)}")
-        sys.exit(1)
+    """Report the scenarios named on the command line (default all); with
+    --save-baseline, store their joint angles as the new baseline."""
+    scenarios, args = parse_args(__doc__, [(("--save-baseline",), dict(
+        action="store_true", help="store these joint angles in ik_baseline.npz as the new baseline"))])
+    save = args.save_baseline
 
     stored   = dict(np.load(BASELINE_PATH)) if os.path.exists(BASELINE_PATH) else {}
     baseline = {} if save else stored

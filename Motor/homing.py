@@ -16,12 +16,12 @@ start pose by hand and run playback.py with --start-pose instead.
 
 The CSV is in each motor's own units (motor positions, after the 30:1 worm);
 speeds, tolerances and printed angles here are at the joint, converted with
-the same table export_timing.py uses (traj_solver/motor_calibration.py).
+the same table export_timing.py uses (traj_solver/core/motor_calibration.py).
 
 BEFORE RUNNING:
-  1. Calibrate in traj_solver/motor_calibration.py — offset = the motor's
+  1. Calibrate in traj_solver/core/motor_calibration.py — offset = the motor's
      reading with the joint at 0 (link straight up from the calf for q1/q4),
-     plus direction sign — then re-run traj_solver/export_timing.py.
+     plus direction sign — then re-run traj_solver/generate/export_timing.py.
      Read the offset with:  python -c "from pybear import Manager; b=Manager.BEAR('/dev/ttyUSB0',8000000); print(b.get_present_position(3, 4, 5, 6))"
   2. Confirm MOTOR_IDS matches your wiring (q1–q4 = BEAR 3–6).
   3. Confirm PORT matches your serial port.
@@ -41,8 +41,8 @@ _PYBEAR_DIR = os.path.join(
 sys.path.insert(0, _PYBEAR_DIR)
 from pybear import Manager
 
-# ── Motor calibration (shared with traj_solver/export_timing.py) ──────────────
-_TRAJ_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "traj_solver")
+# ── Motor calibration (shared with traj_solver/generate/export_timing.py) ─────
+_TRAJ_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "traj_solver", "core")
 sys.path.insert(0, _TRAJ_DIR)
 from motor_calibration import JOINTS
 CAL = [JOINTS[f"q{j}"] for j in range(1, 5)]      # q1 → q4
@@ -96,7 +96,9 @@ _TIMINGS_DIR = os.path.join(
     "..", "traj_solver", "timings",
 )
 
-SCENARIO_NAMES = ["floor_to_wall", "wall_to_ceiling", "outside", "thin_edge"]
+# Every transition with a timing file: traj_solver/generate/export_timing.py writes one for
+# each entry of traj_solver/core/scenarios.py, so a new transition needs no change here.
+SCENARIO_NAMES = sorted(os.path.splitext(f)[0] for f in os.listdir(_TIMINGS_DIR) if f.endswith(".csv"))
 
 
 def load_start_pose(scenario: str) -> list[float]:

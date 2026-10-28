@@ -12,7 +12,7 @@ Controls:
 Jog until q1 is straight up, then press A.  Torque is disabled once the zero
 is captured.  The BEAR's own homing_offset register is set so present_position
 reads 0 at that pose, matching the offset=0.0 default for q1 in
-traj_solver/motor_calibration.py (shared with homing.py / playback.py).
+traj_solver/core/motor_calibration.py (shared with homing.py / playback.py).
 """
 
 import sys
@@ -22,7 +22,7 @@ import math
 
 from pybear import Manager
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "traj_solver"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "traj_solver", "core"))
 from motor_calibration import JOINTS
 
 try:

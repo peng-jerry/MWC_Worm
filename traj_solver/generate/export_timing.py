@@ -3,7 +3,7 @@ export_timing.py — export each transition as a timing file for the robot
 (Motor/homing.py, Motor/playback.py).
 
 Usage:
-    python export_timing.py [scenario | all]     default: all
+    python generate/export_timing.py [scenario ...]     default: all (-h for help)
 
 Writes timings/<scenario>.csv: a header of '#' lines (units, conventions,
 the calibration used and how to interpolate), then one row per waypoint:
@@ -15,7 +15,7 @@ the calibration used and how to interpolate), then one row per waypoint:
   w_back_a_rad_s             motor (motor_calibration.WHEELS): front and back
                              arm A.  Arm B wheels spin freely.
 
-Every value is in its motor's own convention (motor_calibration.py).  With
+Every value is in its motor's own convention (core/motor_calibration.py).  With
 the calibration table at its pass-through defaults that is the display
 convention (kinematics.q_display), counter-clockwise positive in the side view.
 
@@ -29,12 +29,12 @@ they have the same sign, and 0 where the joint stops or turns back.  So the
 cubic never overshoots a waypoint (every waypoint was checked by the
 solver), and a joint holding still between two waypoints stays still.  The
 first and last waypoints have speed 0: the robot starts and ends at rest
-(every phase eases in and out of rest, scenarios.ease).
+(every phase eases in and out of rest, planner.ease).
 
 Wheel speeds
 ------------
 From the motion plan at each waypoint's instant, relative to the wheel's own
-assembly — what the wheel's motor must turn at (scenarios.wheel_speeds).
+assembly — what the wheel's motor must turn at (planner.wheel_speeds).
 Between waypoints the playback changes them linearly.
 
 The waypoint rate is params.SAMPLE_RATE (6 by default; override with e.g.
@@ -45,16 +45,15 @@ import csv
 import os
 import sys
 
-import numpy as np
+# traj_solver/ (this script's parent folder) on the path, so `core` imports from anywhere.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.engine.cli import TIMINGS_DIR, parse_args
+from core.engine.timing_file import waypoints        # the columns (and joint speeds, by the rule above)
+from core.engine.trajectory import solve_trajectory
+from core.motor_calibration import JOINTS, WHEELS
+from core.scenarios import SCENARIOS
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from core.kinematics import q_display
-from core.scenarios import SCENARIOS, wheel_speeds
-from core.trajectory import solve_trajectory, joint_speeds    # joint_speeds: the monotone rule above
-from motor_calibration import JOINTS, WHEELS
-
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUT_DIR = os.path.join(_SCRIPT_DIR, "timings")
+OUT_DIR = TIMINGS_DIR
 
 
 def _header(scn, traj):
@@ -66,7 +65,7 @@ def _header(scn, traj):
                           for name, m in WHEELS.items())
     return f"""\
 # {scn.label}: timing file for Motor/playback.py
-# Written by traj_solver/export_timing.py from solve {traj.key[:16]}
+# Written by traj_solver/generate/export_timing.py from solve {traj.key[:16]}
 # {len(traj)} waypoints, {traj.rate:g} per second, {traj.times[-1]:.3f} s
 #
 # Columns
@@ -80,7 +79,7 @@ def _header(scn, traj):
 # come to rest at every phase boundary, and the whole robot is at rest at the
 # first and last waypoint.
 #
-# Values are in each motor's own convention (traj_solver/motor_calibration.py):
+# Values are in each motor's own convention (traj_solver/core/motor_calibration.py):
 #   joint motor position = offset + sign * ratio * joint angle
 #   motor speed          = sign * ratio * joint or wheel speed
 # joint angle: q1/q4 0 = link straight up from its calf, q2/q3 0 = straight,
@@ -91,25 +90,6 @@ def _header(scn, traj):
 {joint_cal}
 {wheel_cal}
 """
-
-
-def waypoints(traj):
-    """The columns of a solved transition's timing file, {column name: (N,)
-    array} in file order and in motor units."""
-    # Joint angles in display convention, unwrapped so ±π crossings stay continuous.
-    angles = np.unwrap(q_display(traj.Q), axis=0)
-    rates = joint_speeds(traj.times, angles)
-    _, wheel = wheel_speeds(traj.scenario, traj.phases, traj.times)
-
-    columns = {"time_s": traj.times}
-    for j, (name, m) in enumerate(JOINTS.items()):
-        columns[f"{name}_rad"] = m.position(angles[:, j])
-    for j, (name, m) in enumerate(JOINTS.items()):
-        columns[f"d{name}_rad_s"] = m.speed(rates[:, j])
-    for j, (name, m) in enumerate(WHEELS.items()):       # same order as scenarios.WHEELS
-        if m is not None:
-            columns[f"w_{name}_rad_s"] = m.speed(wheel[:, j])
-    return columns
 
 
 def export(name, out_dir=OUT_DIR):
@@ -131,19 +111,9 @@ def export(name, out_dir=OUT_DIR):
     return path
 
 
-def read_timing(path):
-    """The columns of a timing file, {column name: (N,) array}, in motor units."""
-    with open(path, newline="") as fh:
-        rows = list(csv.DictReader(line for line in fh if not line.startswith("#")))
-    return {name: np.array([float(row[name]) for row in rows]) for name in rows[0]}
-
-
 def main():
-    arg = sys.argv[1] if len(sys.argv) > 1 else "all"
-    if arg != "all" and arg not in SCENARIOS:
-        print(f"Unknown scenario '{arg}'. Choose: {list(SCENARIOS)} or 'all'")
-        sys.exit(1)
-    for name in (SCENARIOS if arg == "all" else [arg]):
+    names, _ = parse_args(__doc__)
+    for name in names:
         export(name)
 
 

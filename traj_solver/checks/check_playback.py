@@ -3,7 +3,7 @@ check_playback.py — play a timing file the way the robot does, and measure
 what happens between the waypoints.
 
 Usage:
-    python check_playback.py [scenario | all] [--rate R]     default: all
+    python checks/check_playback.py [scenario ...] [--rate R]     default: all (-h for help)
 
 Motor/playback.py sends every joint, PLAYBACK_HZ times a second, the point on
 the cubic Hermite curve through the two surrounding waypoints (position and
@@ -37,13 +37,18 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from core.constraints import CLEARANCE_GROUPS, HARD_CLEARANCE, SOFT_CLEARANCE, evaluate
-from core.params import MAX_JOINT_SPEED
-from core.scenarios import SCENARIOS, l1, l2, l3, plan_pose
-from core.trajectory import solve_trajectory
-from export_timing import OUT_DIR, read_timing, waypoints
-from motor_calibration import JOINTS, WHEELS
+# traj_solver/ (this script's parent folder) on the path, so `core` imports from anywhere.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.engine.cli import TIMINGS_DIR, parse_args
+from core.engine.constraints import CLEARANCE_GROUPS, evaluate
+from core.engine.kinematics import wrap
+from core.engine.planner import plan_pose
+from core.engine.timing_file import read_timing, waypoints
+from core.engine.trajectory import solve_trajectory
+from core.motor_calibration import JOINTS, WHEELS
+from core.params import HARD_CLEARANCE, MAX_JOINT_SPEED, SOFT_CLEARANCE
+from core.robot import l1, l2, l3
+from core.scenarios import SCENARIOS
 
 PLAYBACK_HZ = 100           # Motor/playback.py INTERP_HZ
 CURVE_POINTS = 51           # points per curve segment for speed and acceleration
@@ -51,11 +56,6 @@ FILE_TOL = 2e-6             # a timing file matches the solve within its 6-decim
 
 # Display convention → solver joint angles (inverse of kinematics.q_display).
 _SHIFT = np.array([np.pi / 2, 0.0, 0.0, np.pi / 2])
-
-
-def _wrap(a):
-    """Wrap angles to [-π, π)."""
-    return (a + np.pi) % (2 * np.pi) - np.pi
 
 
 def hermite(times, q, v, k, a):
@@ -86,7 +86,7 @@ def playback_points(times, rate=PLAYBACK_HZ):
 
 def _from_file(traj):
     """The timing file's columns, or None if it does not match the solved trajectory."""
-    path = os.path.join(OUT_DIR, f"{traj.scenario.name}.csv")
+    path = os.path.join(TIMINGS_DIR, f"{traj.scenario.name}.csv")
     if not os.path.exists(path):
         return None
     cols, expected = read_timing(path), waypoints(traj)
@@ -109,6 +109,7 @@ def check(traj, cols):
     w = np.stack([m.rate(cols[f"w_{n}_rad_s"]) for n, m in driven.items()], axis=1)
 
     def phase(t):
+        """Name of the phase running at time t."""
         return traj.phases[traj.phase_at(t)].name
 
     # Geometry at every playback update.
@@ -124,7 +125,7 @@ def check(traj, cols):
     end_x = x1 + l1 * np.cos(phi1) + l2 * np.cos(phi2) + l3 * np.cos(phi3)
     end_y = y1 + l1 * np.sin(phi1) + l2 * np.sin(phi2) + l3 * np.sin(phi3)
     gap = np.hypot(end_x - x2, end_y - y2)
-    twist = np.abs(_wrap(phi3 + Qs[:, 3] - th2))
+    twist = np.abs(wrap(phi3 + Qs[:, 3] - th2))
 
     clearance = {g: np.empty(len(t)) for g in CLEARANCE_GROUPS}
     broken = {}
@@ -163,6 +164,8 @@ def check(traj, cols):
 
 
 def report(name, traj, r, source):
+    """Print the results of check() for transition `name`; `source` says
+    where the waypoints came from (a timing file, or solved for the check)."""
     times = r["times"]
     print(f"\n=== {name}   ({len(times)} waypoints, {(len(times) - 1) / times[-1]:g} per second, "
           f"{times[-1]:.1f} s; {source}; played at {PLAYBACK_HZ} Hz)")
@@ -179,7 +182,7 @@ def report(name, traj, r, source):
         for rule, ts in r["broken"].items():
             print(f"  HARD RULE BROKEN    {rule}: {len(ts)} updates, t = {ts[0]:.2f} … {ts[-1]:.2f} s")
     else:
-        print(f"  hard rules          met at every update")
+        print("  hard rules          met at every update")
     s, j, t, ph, step = r["speed"]
     over = "  ← over the motor limit" if s > MAX_JOINT_SPEED else ""
     print(f"  joint speed         max {np.degrees(s):.1f}°/s on q{j + 1} (t = {t:.2f} s, {ph})   "
@@ -192,16 +195,11 @@ def report(name, traj, r, source):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    rate = None
-    if "--rate" in sys.argv:
-        rate = float(sys.argv[sys.argv.index("--rate") + 1])
-        args = [a for a in args if a != sys.argv[sys.argv.index("--rate") + 1]]
-    arg = args[0] if args else "all"
-    if arg != "all" and arg not in SCENARIOS:
-        print(f"Unknown scenario '{arg}'. Choose: {list(SCENARIOS)} or 'all'")
-        sys.exit(1)
-    for name in (SCENARIOS if arg == "all" else [arg]):
+    names, args = parse_args(__doc__, [(("--rate",), dict(
+        type=float, metavar="R", help="solve at R waypoints per second instead of reading timings/ "
+                                      "(writes no files)"))])
+    rate = args.rate
+    for name in names:
         if rate is None:
             traj = solve_trajectory(SCENARIOS[name])
             cols = _from_file(traj)

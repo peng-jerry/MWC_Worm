@@ -1,5 +1,6 @@
 """
-Forward kinematics for the 4-joint, 3-link planar linkage.
+kinematics.py — forward kinematics for the 4-joint, 3-link planar linkage,
+the display convention for joint angles, and angle wrapping.
 
 Chain topology:
   front assembly (x1,y1,theta1)
@@ -21,6 +22,11 @@ Display convention (plot_speeds.py, drawing.py, plot_snapshot.py):
 """
 
 import numpy as np
+
+
+def wrap(a):
+    """Wrap angles to [-π, π).  Used everywhere a difference of two angles is taken."""
+    return (a + np.pi) % (2 * np.pi) - np.pi
 
 
 def forward_kinematics(q, x1, y1, theta1, l1, l2, l3):
@@ -74,4 +80,4 @@ def q_display(q):
     Result is wrapped to [-π, π).  q is one joint vector (4,) or many (K, 4).
     """
     shift = np.array([-np.pi / 2, 0.0, 0.0, -np.pi / 2])
-    return (np.asarray(q, dtype=float) + shift + np.pi) % (2 * np.pi) - np.pi
+    return wrap(np.asarray(q, dtype=float) + shift)

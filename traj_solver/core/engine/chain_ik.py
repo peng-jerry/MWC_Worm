@@ -30,12 +30,7 @@ frame of a transition at once.
 
 import numpy as np
 
-from .kinematics import q_display
-
-
-def _wrap(a):
-    """Wrap angles to [-π, π)."""
-    return (a + np.pi) % (2 * np.pi) - np.pi
+from .kinematics import q_display, wrap
 
 
 def solve_branch_batch(q1, sign, x1, y1, theta1, x2, y2, theta2, l1, l2, l3):
@@ -88,7 +83,7 @@ def solve_branch_batch(q1, sign, x1, y1, theta1, x2, y2, theta2, l1, l2, l3):
     phi3 = phi2 + q3
 
     # Relative joint angles; q4 makes the back assembly's orientation theta2.
-    Q = _wrap(np.stack([q1, phi2 - phi1, phi3 - phi2, theta2 - phi3], axis=-1))
+    Q = wrap(np.stack([q1, phi2 - phi1, phi3 - phi2, theta2 - phi3], axis=-1))
     Q[~reachable] = np.nan
     return Q
 
