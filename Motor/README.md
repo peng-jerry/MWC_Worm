@@ -6,7 +6,7 @@ Part of [MWC Worm](../README.md). These scripts drive the robot's BEAR motors: t
 
 - The robot's eight BEAR motors on the USB2BEAR adapter. Each script sets the serial port as `PORT` near its top (`/dev/serial/by-id/usb-Westwood_Robotics_USB2BEAR_Boosted_UB0104-if00-port0`).
 - PyBEAR, the motors' Python library, is bundled in `WRBear_test-20260913T135535Z-1-001/WRBear_test/PyBEAR/`; the scripts add it to their path themselves. It needs pyserial and termcolor.
-- evdev for the Xbox controller (`xbox_live.py`, `zero_q1.py`, `tests/xbox_test.py`), and tkinter for the diagnostics window (optional: without it `xbox_live.py` runs without the window).
+- evdev for the Xbox controller (`xbox_live.py`, `zero_q1.py`, `tests/xbox_test.py`), and tkinter for the diagnostics window (optional: without it `xbox_live.py` and `playback.py` run without the window).
 
 ```bash
 pip install pyserial termcolor evdev
@@ -47,7 +47,7 @@ While playing, `playback.py` reads one motor's full status per update (one packe
 - a motor reports an error or drops out, or
 - a motor misses three reads in a row.
 
-Every reading of every motor (enabled flag, goal, position, speed, currents, supply voltage, temperatures, error code) is saved to `logs/playback_<transition>_<time>.csv` (gitignored).
+Every reading of every motor (enabled flag, goals, position, speed, currents, supply voltage, temperatures, error code) is saved to `logs/playback_<transition>_<time>.csv` (gitignored) and shown in the diagnostics window, whose STOP button stops playback the same way.
 
 ## Setting up the motors
 
@@ -55,7 +55,7 @@ Every reading of every motor (enabled flag, goal, position, speed, currents, sup
 - **Give a motor its ID**: motors are addressed by ID only, so two motors sharing one both act on every command. Renumber one motor at a time with everything else disconnected: `python assign_motor_id.py <new_id>`. It saves the ID so it survives a power cycle; `python tests/power_cycle_test.py` confirms that every ID does.
 - **Move each motor briefly**: `python tests/motor_test.py` (or `python tests/motor_test.py 1,3,5`), with a prompt before each, since moving a joint or swerve can tip the robot.
 - **Check the controller**: `python tests/xbox_test.py`.
-- **Drive by hand**: `python xbox_live.py` — every motor in velocity mode from the Xbox controller, with the joints kept within ±95° by a software limit (the swerves are not limited), a diagnostics window, and **Start** as the emergency stop. The full control mapping is in its docstring.
+- **Drive by hand**: `python xbox_live.py` — every motor in velocity mode from the Xbox controller, with the joints kept within ±95° by a software limit (the swerves are not limited), a diagnostics window, and **Start** as the emergency stop. Every reading is saved to `logs/xbox_live_<time>.csv` (gitignored). The full control mapping is in its docstring.
 
 ## The scripts
 
@@ -66,7 +66,8 @@ Motor/
                          swerves held); stops on a tracking error or motor fault; logs to logs/
   zero_q1.py             jog q1 straight up with the Xbox stick and store that as its zero
   xbox_live.py           drive all 8 motors live from an Xbox controller, with a diagnostics window
-  diagnostics.py         that window: per-motor status, currents, voltage, temperatures, errors;
+  diagnostics.py         that window: live graphs (velocity, position, command - delivered error,
+                         Iq, winding, supply), each motor's mode and status, dropdowns of every value;
                          runs as its own process so drawing never delays control
   assign_motor_id.py     give one isolated motor a new permanent ID
   tests/
@@ -75,5 +76,5 @@ Motor/
     power_cycle_test.py  confirm motor IDs (and encoders) survive a power cycle
     xbox_test.py         check the controller's axes and buttons
   WRBear_test-…/         the BEAR SDK manual, PyBEAR and the original test notebooks
-  logs/                  playback logs (gitignored)
+  logs/                  playback and xbox_live logs (gitignored)
 ```

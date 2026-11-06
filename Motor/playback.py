@@ -52,7 +52,10 @@ than SWERVE_DRIFT_ABORT, a motor reports an error or is no longer enabled, or
 a motor misses READ_FAILS_ABORT reads in a row.  Wheels follow a speed, which
 is logged but not checked (their velocity loop lags on every speed change and
 a wheel can legitimately slip).  Every reading is written to
-logs/playback_<scenario>_<time>.csv.
+logs/playback_<scenario>_<time>.csv and shown in the diagnostics window
+(diagnostics.py), which runs in its own process; its STOP button and closing it
+stop playback the same way.  Without tkinter or a display the script prints why
+and runs without it.
 """
 
 import sys
@@ -69,7 +72,7 @@ _PYBEAR_DIR = os.path.join(
 sys.path.insert(0, _PYBEAR_DIR)
 from pybear import Manager
 
-from diagnostics import STATS, ERROR_BITS, read_stats, decode_code
+from diagnostics import STATS, ERROR_BITS, decode_code, motor_entry, open_window, read_stats
 
 # ── Motor calibration (shared with traj_solver/generate/export_timing.py) ─────
 _TRAJ_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "traj_solver", "core")
@@ -118,6 +121,7 @@ SWERVE_DRIFT_ABORT  = 0.2      # rad at the motor — a swerve this far off stop
 # Command update rate (Hz).  If the PC cannot send all goals within one
 # update, the late count printed at the end says so — lower it if that is large.
 INTERP_HZ = 100
+DIAG_REFRESH_EVERY_N = max(1, INTERP_HZ // 10)    # updates between diagnostics-window refreshes (10×/sec)
 
 # ── Position PID (joints and swerves) ─────────────────────────────────────────
 P_GAIN_POS = 5.0
@@ -361,6 +365,15 @@ if not start_pose:
     else:
         print("  All joints within tolerance.")
 
+# Current caps, per motor, for the window and the end-of-run summary
+caps = {**{mid: JOINT_IQ_MAX for mid in JOINT_IDS.values()},
+        **{mid: WHEEL_IQ_MAX for mid in WHEEL_IDS.values()},
+        **{mid: SWERVE_IQ_MAX for mid in SWERVE_IDS.values()}}
+
+diag = open_window(f"BEAR diagnostics - playback {scenario}",
+                   [motor_entry(bear, NAMES[mid], mid, caps[mid]) for mid in sorted(ALL_IDS)],
+                   stop_hint="STOP, Ctrl-C or closing this window stop playback: wheels to 0, joints and swerves held.")
+
 print("\nEnabling motors...")
 for n, mid in JOINT_IDS.items():
     bear.set_goal_position((mid, q_frames[n][0] + offset[n]))    # prime goal before enabling
@@ -398,6 +411,8 @@ LOG_COLUMNS = (["t_s", "motor", "bear_id", "command", "joint_error_deg", "swerve
                + STATS + ["error_code"])
 
 t_start = time.time()
+diag_state = {mid: {"command": 0.0, "unit": "rad/s" if mid in WHEEL_IDS.values() else "rad", "stats": None,
+                    "last_reply": t_start, "missed": 0} for mid in ALL_IDS}
 
 try:
     for tick in range(n_ticks + 1):
@@ -430,10 +445,12 @@ try:
         st  = read_stats(bear, mid)
         if st is None:
             fails[mid] += 1
+            diag_state[mid]["missed"] += 1
             if fails[mid] >= READ_FAILS_ABORT:
                 abort = f"BEAR {mid} ({n}) missed {fails[mid]} reads in a row"
         else:
             fails[mid] = 0
+            diag_state[mid].update(stats=st, last_reply=time.time())
             joint_err = swerve_drift = ""
             if n in JOINT_IDS:
                 cmd = goal[n]
@@ -464,6 +481,18 @@ try:
                              st["ic_temperature"])
             pk["volts"] = min(pk["volts"], st["input_voltage"])
             log.append([t, n, mid, cmd, joint_err, swerve_drift] + [st[s] for s in STATS] + [st["error"]])
+
+        if diag is not None and tick % DIAG_REFRESH_EVERY_N == 0:
+            now = time.time()
+            for ids, values in ((JOINT_IDS, goal), (WHEEL_IDS, command), (SWERVE_IDS, hold)):
+                for name, motor in ids.items():
+                    diag_state[motor]["command"] = values[name]
+            worst = max(track, key=track.get)
+            snap = {"info": f"t = {t:.1f} of {times[-1]:.1f} s   ·   waypoint {k}/{n_frames - 1}   ·   "
+                            f"late updates {late}   ·   worst joint {worst} off by {math.degrees(track[worst]):.1f}°",
+                    "motors": {m: dict(diag_state[m], age=now - diag_state[m]["last_reply"]) for m in ALL_IDS}}
+            if not diag.update(snap) and abort is None:
+                abort = "STOP pressed or diagnostics window closed"
         if abort:
             break
 
@@ -489,9 +518,6 @@ try:
     print("Joint tracking error, max: " + "  ".join(f"{n} {math.degrees(v):.2f}°" for n, v in track_max.items())
           + f"   (readings above {math.degrees(TRACK_WARN):.0f}°: {warned})")
     print("Swerve drift, max: " + "  ".join(f"{n} {v:.3f} rad" for n, v in drift_max.items()))
-    caps = {**{mid: JOINT_IQ_MAX for mid in JOINT_IDS.values()},
-            **{mid: WHEEL_IQ_MAX for mid in WHEEL_IDS.values()},
-            **{mid: SWERVE_IQ_MAX for mid in SWERVE_IDS.values()}}
     for mid in ALL_IDS:
         pk = peak[mid]
         if pk["volts"] < float("inf"):
@@ -544,3 +570,5 @@ finally:
             print(f"  BEAR {mid}: disable failed ({e!r})")
     bear.close_port()
     print("All motors disabled, port closed.")
+    if diag is not None:
+        diag.close()

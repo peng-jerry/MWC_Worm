@@ -21,8 +21,9 @@ Usage:
         --no-render   solve and check only
 
 Writes outputs/gifs/<scenario>.mp4 (.gif if ffmpeg is not installed).  Exits
-non-zero if the check finds a problem in any transition (so build_all.py
-reports it); joints past the soft limit are only warnings.
+non-zero if the check finds a problem in any transition, or one cannot be
+planned at all (so build_all.py reports it); joints past the soft limit are
+only warnings.
 """
 
 import os
@@ -36,7 +37,7 @@ import matplotlib.animation as animation
 
 # traj_solver/ (this script's parent folder) on the path, so `core` imports from anywhere.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.engine.cli import output_dir, parse_args
+from core.engine.cli import run_each, output_dir, parse_args
 from core.engine.drawing import draw_frame, plot_limits
 from core.engine.kinematics import q_display, wrap
 from core.engine.planner import WHEELS, wheel_speeds
@@ -219,15 +220,13 @@ def run(name, render=True):
 def main():
     names, args = parse_args(__doc__, [(("--no-render",), dict(
         action="store_true", help="solve and check only; write no animation"))])
-    failed = []
-    for i, name in enumerate(names):
-        if i:
+
+    def animate(name):
+        if name != names[0]:
             print()
-        if not run(name, render=not args.no_render):
-            failed.append(name)
-    if failed:
-        print(f"\nThe check found problems in: {', '.join(failed)}")
-        sys.exit(1)
+        return run(name, render=not args.no_render)
+
+    sys.exit(1 if run_each(names, animate) else 0)
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ import numpy as np
 
 # traj_solver/ (this script's parent folder) on the path, so `core` imports from anywhere.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.engine.cli import parse_args
+from core.engine.cli import run_each, parse_args
 from core.engine.constraints import CLEARANCE_GROUPS
 from core.engine.kinematics import q_display
 from core.engine.trajectory import solve_trajectory
@@ -160,15 +160,17 @@ def main():
     stored   = dict(np.load(BASELINE_PATH)) if os.path.exists(BASELINE_PATH) else {}
     baseline = {} if save else stored
 
-    for sc in scenarios:
+    def one(sc):
         traj, seconds = solve(sc)
         m = metrics(traj)
         report(sc, traj, m, seconds, baseline)
         stored[sc] = m["Q"]
 
+    failed = run_each(scenarios, one)
     if save:
         np.savez(BASELINE_PATH, **stored)
         print(f"\nSaved baseline → {BASELINE_PATH}")
+    sys.exit(1 if failed else 0)
 
 
 if __name__ == "__main__":

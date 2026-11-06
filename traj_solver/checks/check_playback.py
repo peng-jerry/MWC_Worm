@@ -39,7 +39,7 @@ import numpy as np
 
 # traj_solver/ (this script's parent folder) on the path, so `core` imports from anywhere.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.engine.cli import TIMINGS_DIR, parse_args
+from core.engine.cli import run_each, TIMINGS_DIR, parse_args
 from core.engine.constraints import CLEARANCE_GROUPS, evaluate
 from core.engine.kinematics import wrap
 from core.engine.planner import plan_pose
@@ -199,19 +199,22 @@ def main():
         type=float, metavar="R", help="solve at R waypoints per second instead of reading timings/ "
                                       "(writes no files)"))])
     rate = args.rate
-    for name in names:
+
+    def one(name):
         if rate is None:
             traj = solve_trajectory(SCENARIOS[name])
             cols = _from_file(traj)
             if cols is None:
                 print(f"\n=== {name}: timings/{name}.csv is missing or out of date — "
-                      f"run export_timing.py first")
-                continue
+                      f"run generate/export_timing.py first")
+                return False
             source = f"timings/{name}.csv"
         else:
             traj = solve_trajectory(SCENARIOS[name], rate)
             cols, source = waypoints(traj), "solved for this check"
         report(name, traj, check(traj, cols), source)
+
+    sys.exit(1 if run_each(names, one) else 0)
 
 
 if __name__ == "__main__":

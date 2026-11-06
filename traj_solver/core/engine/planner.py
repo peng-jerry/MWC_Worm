@@ -19,7 +19,9 @@ them run through the same phases:
   6 depart      both roll away to the standard end
 
 At an inside corner, 3 and 4 move the assemblies one after the other so the
-chain never folds up between the two surfaces.  At an outside corner or edge
+chain never folds up between the two surfaces — unless that would take the
+chain out of reach (a corner wider than a right angle), when they roll
+together instead (plan_phases).  At an outside corner or edge
 they are a single phase, "both roll", in which the two assemblies roll at the
 same time (Scenario.rolls_together), so those transitions have five phases.
 
@@ -114,6 +116,16 @@ CHAIN_MIN_SPAN = _chain_min_span()   # ≈ 0.33 m (depends on the joint limit to
 SIDE = {"front": +1, "back": -1}
 
 
+class PlanError(ValueError):
+    """
+    A transition that cannot be planned or solved, with a message naming it
+    and saying why (out of the chain's reach, an assembly would hit something,
+    no valid joint angles, …).  The scripts report it and go on to the next
+    transition.  A mistake in a transition's definition is a plain ValueError
+    instead, raised as soon as core/scenarios.py is read.
+    """
+
+
 # ── A transition (the definitions are in core/scenarios.py) ───────────────────
 
 @dataclass(frozen=True)
@@ -188,11 +200,14 @@ class Scenario:
     @property
     def rolls_together(self):
         """
-        Whether both assemblies roll at the same time between the two pivots
-        (True: one phase) or one after the other (False: the leading one
-        rolls clear, then the trailing one rolls up).  At an inside corner,
-        rolling both at once would bring them toward the corner together and
-        fold the chain up between the two surfaces.  At an outside corner or
+        Whether both assemblies always roll at the same time between the two
+        pivots (True: one phase) or, by preference, one after the other
+        (False: the leading one rolls clear, then the trailing one rolls up).
+        At an inside corner, rolling both at once would bring them toward the
+        corner together and fold the chain up between the two surfaces — but
+        at a corner wider than a right angle, rolling them in turn can stretch
+        the chain beyond its reach, and then plan_phases has them roll
+        together after all.  At an outside corner or
         edge, rolling both at once keeps the gap at or below the follow gap
         all the way (each moves in a straight line, so the gap is largest at
         the ends, where it is the follow gap); rolling them in turn would
@@ -361,7 +376,7 @@ def roll_to_separation(scn, surface, side, other, separation):
     c = d @ d - separation ** 2
     disc = b * b - c
     if disc < 0:
-        raise ValueError(f"{scn.name}: no position on the surface is {separation:.3f} m from the "
+        raise PlanError(f"{scn.name}: no position on the surface is {separation:.3f} m from the "
                          f"other chain joint")
     return base + (-b + math.sqrt(disc)) * t
 
@@ -497,10 +512,28 @@ def _without_backsteps(scn, pose, k, surface, side, approaching):
     return softened
 
 
+def _within_reach(*phases, samples=101):
+    """
+    Whether the chain can span the gap between the two chain joints all
+    through these phases: never farther apart than CHAIN_LENGTH nor closer
+    than CHAIN_MIN_SPAN — the test sample_poses applies to every frame.
+    """
+    for pose in phases:
+        for f in np.linspace(0.0, 1.0, samples):
+            lead, _, trail, _ = pose(f)
+            if not CHAIN_MIN_SPAN <= float(np.linalg.norm(_vec(lead) - _vec(trail))) <= CHAIN_LENGTH:
+                return False
+    return True
+
+
 def plan_phases(scn, min_durations=None, gap=None):
     """
     The phases of a transition: six, or five when the assemblies roll
-    together between the pivots (Scenario.rolls_together).
+    together between the pivots — always at an outside corner or edge
+    (Scenario.rolls_together), and at an inside corner when rolling one after
+    the other would take the chain out of reach (_within_reach).
+
+    Raises PlanError if the transition cannot be planned.
 
     gap: outside corners and edges only — the gap (m) the partner aims to
     keep while following a pivot (it opens a little where keeping it would
@@ -525,10 +558,10 @@ def plan_phases(scn, min_durations=None, gap=None):
     trail_ready = pivot_pose(scn, trail, 0.0)[0]     # trailing assembly about to pivot
     trail_across = pivot_pose(scn, trail, 1.0)[0]    # trailing assembly after its pivot
     if along(A, lead_ready) >= START_DISTANCE:
-        raise ValueError(f"{scn.name}: START_DISTANCE is too short — the leading assembly "
+        raise PlanError(f"{scn.name}: START_DISTANCE is too short — the leading assembly "
                          f"pivots {along(A, lead_ready):.3f} m from the transition")
     if along(B, trail_across) >= END_DISTANCE:
-        raise ValueError(f"{scn.name}: END_DISTANCE is too short — the trailing assembly "
+        raise PlanError(f"{scn.name}: END_DISTANCE is too short — the trailing assembly "
                          f"finishes its pivot {along(B, trail_across):.3f} m from the transition")
 
     # Where the partner of a pivoting assembly is.  Following: `gap` from the
@@ -569,8 +602,9 @@ def plan_phases(scn, min_durations=None, gap=None):
     # 3, 4: from the end of phase 2 to the start of phase 5.  At an inside
     #   corner the leading assembly rolls along the new surface first (3),
     #   then the trailing one rolls up to the transition (4), which keeps the
-    #   chain from folding up between the two surfaces.  At an outside corner
-    #   or edge both do it at once, in one phase (Scenario.rolls_together).
+    #   chain from folding up between the two surfaces — if the chain can span
+    #   the gap all the way.  Otherwise (a corner wider than a right angle), and
+    #   always at an outside corner or edge, both do it at once, in one phase.
     lead_across, _, trail_after, _ = lead_pivot(1.0)
     lead_waiting = trail_pivot(0.0)[0]
 
@@ -592,7 +626,7 @@ def plan_phases(scn, min_durations=None, gap=None):
     def depart(f):
         return _lerp(lead_leaving, lead_end, f), thB, _lerp(trail_across, trail_end, f), thB
 
-    if scn.rolls_together:
+    if scn.rolls_together or not _within_reach(lead_rolls, trail_rolls):
         middle = [("both roll", both_roll)]
     else:
         middle = [(f"{scn.lead} rolls clear", lead_rolls),
@@ -657,15 +691,15 @@ def sample_poses(scn, phases, rate):
         name = phases[_phase_index(starts, t)].name
         gap = float(np.hypot(pose["x2"] - pose["x1"], pose["y2"] - pose["y1"]))
         if gap > CHAIN_LENGTH:
-            raise ValueError(f"{scn.name}: chain joints {gap:.3f} m apart at t = {t:.2f} s "
+            raise PlanError(f"{scn.name}: chain joints {gap:.3f} m apart at t = {t:.2f} s "
                              f"({name}), beyond the chain's reach")
         if gap < CHAIN_MIN_SPAN:
-            raise ValueError(f"{scn.name}: chain joints {gap:.3f} m apart at t = {t:.2f} s "
+            raise PlanError(f"{scn.name}: chain joints {gap:.3f} m apart at t = {t:.2f} s "
                              f"({name}), closer than the chain can fold ({CHAIN_MIN_SPAN:.3f} m)")
         problems = check_assemblies(scn, pose)
         if problems:
             listed = ", ".join(f"{k} ({v * 1000:+.1f} mm)" for k, v in problems.items())
-            raise ValueError(f"{scn.name}: at t = {t:.2f} s ({name}): {listed}")
+            raise PlanError(f"{scn.name}: at t = {t:.2f} s ({name}): {listed}")
         poses.append(pose)
     return times, poses
 
@@ -744,7 +778,7 @@ def follow_gap(scn, rate=SAMPLE_RATE):
         best = min(range(max(1, c - 2 * k), min(n, c + 2 * k) + 1), key=worst)
         if math.isfinite(worst(best)):
             return best * FOLLOW_GAP_STEP
-    raise ValueError(f"{scn.name}: no follow gap up to the cruise gap gives every pose a valid "
+    raise PlanError(f"{scn.name}: no follow gap up to the cruise gap gives every pose a valid "
                      f"configuration within ±{FOLLOW_GAP_TOLERANCE * 1000:.0f} mm")
 
 
@@ -780,7 +814,7 @@ def cruise_posture(scn, pose):
                     and (best is None or cost < best[0]):
                 best = (cost, q)
     if best is None:
-        raise ValueError(f"{scn.name}: no feasible cruise posture at this pose")
+        raise PlanError(f"{scn.name}: no feasible cruise posture at this pose")
     return best[1]
 
 
