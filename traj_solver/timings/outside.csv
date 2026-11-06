@@ -1,5 +1,5 @@
 # Outside corner (top of a block to its exterior wall): timing file for Motor/playback.py
-# Written by traj_solver/generate/export_timing.py from solve d601a6f39c660030
+# Written by traj_solver/generate/export_timing.py from solve 6c0e66a2ed7efac2
 # 179 waypoints, 6 per second, 29.667 s
 #
 # Columns

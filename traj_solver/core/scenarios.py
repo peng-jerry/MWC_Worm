@@ -47,8 +47,11 @@ The plan is then checked as it is sampled: if the chain would be out of reach
 or an assembly would hit a surface or the other assembly, the message says
 when; START_DISTANCE / END_DISTANCE (params.py) may need to be longer.
 
-What can be modelled: two flat surfaces meeting at one corner, or the two
-faces of a plate.  Curved surfaces, steps (two corners) and gaps cannot.
+What can be modelled: two flat surfaces meeting at one corner of any angle,
+or the two faces of a plate.  Curved surfaces, steps (two corners) and gaps
+cannot.  Tried and solving (not in the set): the reverse of `outside` (up an
+exterior wall onto the top), a floor to a 45° ramp, and over the top of a
+thin vertical wall.
 """
 
 import numpy as np

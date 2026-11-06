@@ -4,13 +4,15 @@ transitions named on the command line, and where their files go.
 
 Every script takes any number of transition names from core/scenarios.py, or
 `all` (also what no name means), plus its own options, and prints its
-docstring for -h / --help.
+docstring for -h / --help.  It works through them with run_each, so one
+transition that cannot be planned does not stop the others.
 """
 
 import argparse
 import os
 
 from ..scenarios import SCENARIOS
+from .planner import PlanError
 
 TRAJ_SOLVER_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TIMINGS_DIR = os.path.join(TRAJ_SOLVER_DIR, "timings")      # export_timing.py → Motor/
@@ -43,3 +45,26 @@ def parse_args(doc, options=()):
     if not args.scenarios or "all" in args.scenarios:
         return list(SCENARIOS), args
     return list(dict.fromkeys(args.scenarios)), args
+
+
+def run_each(names, work):
+    """
+    Call work(name) for each transition in turn.  One that cannot be planned
+    or solved (planner.PlanError, whose message says why) is reported and
+    skipped, and the rest still run; work returning False also counts as a
+    failure.  Returns the names that failed, after listing them, so a script
+    can end with sys.exit(1 if run_each(...) else 0).
+    """
+    failed = []
+    for name in names:
+        try:
+            ok = work(name) is not False
+        except PlanError as e:
+            why = str(e).removeprefix(f"{name}: ")      # the message names the transition already
+            print(f"\n{name}: cannot be planned or solved — {why}")
+            ok = False
+        if not ok:
+            failed.append(name)
+    if failed:
+        print(f"\nFailed: {', '.join(failed)}")
+    return failed

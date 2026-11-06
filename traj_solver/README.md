@@ -99,7 +99,7 @@ All four transitions follow the same requirements; nothing is tuned per transiti
 | Pivot | the assembly stays pressed into both surfaces, turning at an even rate | the trailing wheel rolls around the solid's outline (round the corner, along the end face if there is one, round the next corner) while the assembly turns at an even rate, so the turn never pauses on the end face |
 | Partner during a pivot | **parks** | **follows** at the follow gap, never rolling backwards: where keeping the gap exactly would make it back up, it eases to a stop and waits, and the gap opens a little instead |
 | Gap in approach / depart | stays 0.786 m | closes from 0.786 m to the follow gap / opens back to 0.786 m |
-| Phases 3 and 4 | **one after the other** (leading first), so the chain does not fold up into the corner | **one phase, "both roll"**: both roll at once, so the chain does not stretch over the edge |
+| Phases 3 and 4 | **one after the other** (leading first), so the chain does not fold up into the corner; at a corner wider than a right angle, where that would stretch the chain out of reach, they roll together instead | **one phase, "both roll"**: both roll at once, so the chain does not stretch over the edge |
 | Number of phases | 6 | 5 |
 
 The **follow gap** is chosen per exterior transition (`planner.follow_gap`): gaps up to the cruise gap (0.786 m) are searched on a 5 mm grid (every 20 mm first, then finer around the best), each as a complete plan, and scored by the smallest peak joint angle any valid configuration can achieve over all its poses. Each gap is judged by its worst score within ±10 mm, since the robot will not hold the gap exactly.
@@ -124,7 +124,7 @@ The transitions are the entries of `SCENARIOS` in `core/scenarios.py`; that file
 3. Set `corner` (`"inside"` or `"outside"`), `turn` (each assembly's rotation, counter-clockwise positive: the short way round a corner, ±180° round a plate's end) and `wg` (an arm layout from `core/robot.py`). Which assembly leads is worked out from the surfaces.
 4. In this folder: `python checks/check_constraints.py`, then `python generate/animate.py <name> --no-render`, then `python build_all.py`. Add a row to the table under [Transitions](#transitions).
 
-Nothing else changes: every script, plot and check, and `../Motor/homing.py` / `../Motor/playback.py` (which list the files in `timings/`), pick a new entry up by its name. A mistake in a definition stops the scripts straight away with a message naming the transition and the mistake; `check_constraints.py` tests that each kind of mistake is caught. What can be modelled: two flat surfaces meeting at one corner, or the two faces of a plate (not curved surfaces, steps or gaps).
+Nothing else changes: every script, plot and check, and `../Motor/homing.py` / `../Motor/playback.py` (which list the files in `timings/`), pick a new entry up by its name. A mistake in a definition stops the scripts straight away with a message naming the transition and the mistake; `check_constraints.py` tests that each kind of mistake is caught. What can be modelled: two flat surfaces meeting at one corner of any angle, or the two faces of a plate (not curved surfaces, steps or gaps). If a transition cannot be planned (the chain would be out of reach, an assembly would hit something), the scripts say so for that transition and carry on with the others.
 
 ## Rules
 

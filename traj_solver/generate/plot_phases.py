@@ -25,7 +25,7 @@ import matplotlib.pyplot as plt
 
 # traj_solver/ (this script's parent folder) on the path, so `core` imports from anywhere.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.engine.cli import output_dir, parse_args
+from core.engine.cli import run_each, output_dir, parse_args
 from core.engine.drawing import draw_frame, plot_limits
 from core.engine.kinematics import q_display
 from core.engine.trajectory import solve_trajectory
@@ -79,8 +79,7 @@ def plot(name, out_dir=OUT_DIR):
 
 def main():
     names, _ = parse_args(__doc__)
-    for name in names:
-        plot(name)
+    sys.exit(1 if run_each(names, plot) else 0)
 
 
 if __name__ == "__main__":

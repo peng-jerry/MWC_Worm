@@ -47,7 +47,7 @@ import sys
 
 # traj_solver/ (this script's parent folder) on the path, so `core` imports from anywhere.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.engine.cli import TIMINGS_DIR, parse_args
+from core.engine.cli import run_each, TIMINGS_DIR, parse_args
 from core.engine.timing_file import waypoints        # the columns (and joint speeds, by the rule above)
 from core.engine.trajectory import solve_trajectory
 from core.motor_calibration import JOINTS, WHEELS
@@ -113,8 +113,7 @@ def export(name, out_dir=OUT_DIR):
 
 def main():
     names, _ = parse_args(__doc__)
-    for name in names:
-        export(name)
+    sys.exit(1 if run_each(names, export) else 0)
 
 
 if __name__ == "__main__":

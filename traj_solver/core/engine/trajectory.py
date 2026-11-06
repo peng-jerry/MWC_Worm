@@ -41,7 +41,7 @@ import scipy
 from .kinematics import q_display
 from ..params import MAX_RETIMES, PLAN_JOINT_SPEED, RETIME_TOLERANCE, SAMPLE_RATE
 from ..robot import l1, l2, l3
-from .planner import (Scenario, plan_phases, phase_starts, sample_poses,
+from .planner import (PlanError, Scenario, plan_phases, phase_starts, sample_poses,
                         cruise_posture, follow_gap)
 from .trajectory_ik import solve_trajectory_dp
 
@@ -145,20 +145,24 @@ def _phase_peak_speeds(times, Q, phases):
 
 
 def _solve(scn, rate):
-    """The solve itself (see solve_trajectory)."""
+    """The solve itself (see solve_trajectory).  Raises PlanError if the
+    transition cannot be planned or no joint angles connect its frames."""
     gap = follow_gap(scn, rate) if scn.partner_follows else None
     min_durations = None
     for retimes in range(MAX_RETIMES + 1):
         phases = plan_phases(scn, min_durations, gap)
         times, poses = sample_poses(scn, phases, rate)
         frame_rate = (len(times) - 1) / times[-1]
-        Q, infos = solve_trajectory_dp(
-            poses, scn.env, scn.wg, l1, l2, l3,
-            dt=1.0 / frame_rate,
-            max_step=PLAN_JOINT_SPEED / frame_rate,
-            q_start=cruise_posture(scn, poses[0]),
-            q_end=cruise_posture(scn, poses[-1]),
-        )
+        try:
+            Q, infos = solve_trajectory_dp(
+                poses, scn.env, scn.wg, l1, l2, l3,
+                dt=1.0 / frame_rate,
+                max_step=PLAN_JOINT_SPEED / frame_rate,
+                q_start=cruise_posture(scn, poses[0]),
+                q_end=cruise_posture(scn, poses[-1]),
+            )
+        except RuntimeError as e:             # no closed chain, or no path through the frames
+            raise PlanError(f"{scn.name}: {e}") from None
         peaks = _phase_peak_speeds(times, Q, phases)
         too_fast = peaks > PLAN_JOINT_SPEED * (1 + RETIME_TOLERANCE)
         if not too_fast.any() or retimes == MAX_RETIMES:
