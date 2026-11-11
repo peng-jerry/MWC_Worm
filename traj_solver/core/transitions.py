@@ -1,7 +1,7 @@
 """
-scenarios.py — the transitions the robot makes.  Add or change one here.
+transitions.py — the transitions the robot makes.  Add or change one here.
 
-Each entry of SCENARIOS describes one transition by its two surfaces.  The
+Each entry of TRANSITIONS describes one transition by its two surfaces.  The
 motion is planned from that geometry alone (engine/planner.py), so nothing
 else needs to know about a new entry: every script, plot, check and the
 robot's Motor/ scripts pick it up by its name.
@@ -31,7 +31,7 @@ Adding a transition
                 robot goes round it
      wg         the arm layout: wg_inside, wg_outside or wg_thin_edge from
                 robot.py, or a new WheelGeometry defined there
-   Which assembly leads is worked out from the surfaces (Scenario.lead).
+   Which assembly leads is worked out from the surfaces (Transition.lead).
 4. Check and build, in traj_solver/:
      python checks/check_constraints.py             samples every plan, the new one too
      python generate/animate.py <name> --no-render  solves it, prints its phases, checks it
@@ -57,28 +57,28 @@ thin vertical wall.
 import numpy as np
 
 from .engine.environment import Surface
-from .engine.planner import Scenario
+from .engine.transition import Transition
 from .robot import wg_inside, wg_outside, wg_thin_edge
 
 THIN_EDGE_THICKNESS = 0.0034      # m, the plate of the thin-edge transition
 
-SCENARIOS = {
-    "floor_to_wall": Scenario(
+TRANSITIONS = {
+    "floor_to_wall": Transition(
         name="floor_to_wall", label="Floor to wall (inside corner)",
         approach=Surface(origin=(0.0, 0.0), tangent=(1, 0), normal=(0, 1)),   # floor, robot at x > 0
         depart=Surface(origin=(0.0, 0.0), tangent=(0, 1), normal=(1, 0)),     # wall, robot above the floor
         turn=-np.pi / 2, corner="inside", wg=wg_inside),
-    "wall_to_ceiling": Scenario(
+    "wall_to_ceiling": Transition(
         name="wall_to_ceiling", label="Wall to ceiling (inside corner)",
         approach=Surface(origin=(0.0, 1.5), tangent=(0, -1), normal=(1, 0)),  # wall, robot below the ceiling
         depart=Surface(origin=(0.0, 1.5), tangent=(1, 0), normal=(0, -1)),   # ceiling, robot at x > 0
         turn=-np.pi / 2, corner="inside", wg=wg_inside),
-    "outside": Scenario(
+    "outside": Transition(
         name="outside", label="Outside corner (top of a block to its exterior wall)",
         approach=Surface(origin=(0.0, 0.55), tangent=(1, 0), normal=(0, 1)),  # top of the block, robot at x > 0
         depart=Surface(origin=(0.0, 0.55), tangent=(0, -1), normal=(-1, 0)),  # exterior wall, robot below the top
         turn=+np.pi / 2, corner="outside", wg=wg_outside),
-    "thin_edge": Scenario(
+    "thin_edge": Transition(
         name="thin_edge", label="Thin edge (top to underside)",
         approach=Surface(origin=(0.50, 0.50), tangent=(-1, 0), normal=(0, 1)),     # top face
         depart=Surface(origin=(0.50, 0.50 - THIN_EDGE_THICKNESS),                  # underside
@@ -88,7 +88,7 @@ SCENARIOS = {
     # A template: the reverse of floor_to_wall.  It was tried (it solves in
     # 36.7 s and passes the check) but is not part of the set — uncomment it
     # to add it.
-    # "wall_to_floor": Scenario(
+    # "wall_to_floor": Transition(
     #     name="wall_to_floor", label="Wall to floor (inside corner)",
     #     approach=Surface(origin=(0.0, 0.0), tangent=(0, 1), normal=(1, 0)),   # wall, robot above the floor
     #     depart=Surface(origin=(0.0, 0.0), tangent=(1, 0), normal=(0, 1)),     # floor, robot at x > 0

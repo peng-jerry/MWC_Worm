@@ -5,7 +5,7 @@ joint and clearance limits, and the motion plan every transition shares.
 Also the solver's weights and search resolution, and how phases are slowed
 down for the speed limit.  Elsewhere in core/: the robot's dimensions are in
 robot.py, and the transitions themselves (their surfaces, turns and arm
-layouts) in scenarios.py.  Nothing in core/engine/ needs editing to change any
+layouts) in transitions.py.  Nothing in core/engine/ needs editing to change any
 of these.
 
 All times are in seconds and lengths in metres.  engine/planner.py works out how
@@ -26,27 +26,29 @@ import numpy as np
 from .robot import CHAIN_LENGTH
 
 # ── Sampling ──────────────────────────────────────────────────────────────────
-# Waypoints per second.  Between waypoints the MCU interpolates each joint on
-# its own, which opens the closed chain slightly; 6 fps keeps that gap to a few
-# millimetres (it was 5–16 mm at 3 fps with linear interpolation).
+# Waypoints per second.  Between waypoints Motor/playback.py moves each joint
+# along its own curve at 100 Hz, which opens the closed chain slightly; at 6
+# per second that gap stays under a millimetre (checks/check_playback.py
+# measures it).
 SAMPLE_RATE = float(os.environ.get("TRAJ_SAMPLE_RATE", 6.0))
 
 # Phase durations are rounded up to whole multiples of this step, so every
-# phase boundary falls exactly on a frame at 3 or 6 fps.
+# phase boundary falls exactly on a waypoint at 3 or 6 per second.
 SCHEDULE_STEP = 1 / 3
 
 # ── Speeds ────────────────────────────────────────────────────────────────────
-MAX_JOINT_SPEED  = np.radians(21.6)   # rad/s, the joint speed limit (motor setting)
-PLAN_JOINT_SPEED = np.radians(21.0)   # rad/s, what the solver plans to: ~3% margin
-                                      # under MAX_JOINT_SPEED for tracking error
-SLIDE_SPEED      = 0.105              # m/s, top speed of any assembly while rolling
+PLAN_JOINT_SPEED = np.radians(21.0)   # rad/s, what the solver plans to: ~3% margin under the
+                                      # motors' limit (motor_limits.py) for tracking error
+ROLL_SPEED      = 0.105              # m/s, top speed of any assembly while rolling
 PIVOT_RATE       = np.radians(15.0)   # rad/s, how fast an assembly turns while pivoting
 
 # Every phase starts and ends at rest: its speed ramps up from rest over the
 # first RAMP_TIME seconds along an S-curve and back down over the last
 # RAMP_TIME (planner.ease), so each phase is RAMP_TIME longer than at
 # constant speed.  Peak acceleration is π/2 × speed / RAMP_TIME: at 0.5 s,
-# 0.33 m/s² for an assembly at SLIDE_SPEED and 66°/s² for a joint at 21°/s.
+# 0.33 m/s² for an assembly at ROLL_SPEED and 66°/s² for a joint at 21°/s.
+# That is the plan's ramp: the joints reach more on the curves the robot plays
+# (checks/check_playback.py reports it).
 RAMP_TIME        = 0.5                # s
 
 # ── Joint limits ──────────────────────────────────────────────────────────────
@@ -69,8 +71,8 @@ FEASIBILITY_TOL = 1e-3    # m or rad by which a hard rule may be missed (roundin
 # ── Motion plan: the same for every transition (planner.plan_phases) ───────
 START_DISTANCE        = 0.40                  # m, leading chain joint before the transition at the start
 END_DISTANCE          = 0.40                  # m, trailing chain joint past the transition at the end
-CRUISE_SEPARATION     = 0.80 * CHAIN_LENGTH   # gap between chain joints at the start and end
-FOLLOW_GAP_STEP       = 0.005                 # m, spacing of the follow gaps tried (planner.follow_gap)
+CRUISE_GAP     = 0.80 * CHAIN_LENGTH   # gap between chain joints at the start and end
+FOLLOW_GAP_STEP       = 0.005                 # m, spacing of the follow gaps tried (follow_gap.py)
 FOLLOW_GAP_TOLERANCE  = 0.010                 # m, how far the robot's real gap may be off the plan
 
 # ── Retiming (engine/trajectory.py) ───────────────────────────────────────────

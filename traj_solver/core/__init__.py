@@ -10,13 +10,17 @@ engine/, which should not need editing.
   params.py      every setting you tune: sampling, speeds, joint and clearance
                  limits, the motion plan every transition shares, the solver's
                  weights and search resolution
-  scenarios.py   the transitions, one entry each, and how to add one
+  transitions.py   the transitions, one entry each, and how to add one
   motor_calibration.py
                  each motor's zero offset, direction and gear ratio (also
                  read by Motor/); only the timing files depend on it
+  motor_limits.py
+                 the speed and position limits the motors run under and how
+                 often they are commanded (also read by Motor/)
 
   engine/        the implementation (see engine/__init__.py)
 
-robot.py, params.py and motor_calibration.py import nothing else from core; scenarios.py builds its
-entries with engine.planner.Scenario.
+robot.py, motor_calibration.py and motor_limits.py import nothing else from
+core; params.py imports robot.py, and transitions.py builds its entries with
+engine.transition.Transition.
 """

@@ -1,24 +1,25 @@
 """
-build_all.py — regenerate every output file for every transition in core/scenarios.py.
+build_all.py — regenerate every output file for every transition in core/transitions.py.
 
 Usage:
-    python build_all.py [scenario ...]               default: all (-h for help)
-    python build_all.py [scenario ...] --no-render   everything except the GIFs
+    python build_all.py [transition ...]               default: all (-h for help)
+    python build_all.py [transition ...] --no-render   everything except the GIFs
                                                      (animate.py still checks)
 
 Runs the scripts in generate/; outputs written, one file per transition:
-    outputs/gifs/<scenario>.gif        generate/animate.py
-    outputs/speeds/<scenario>.png      generate/plot_speeds.py
-    outputs/phases/<scenario>.png      generate/plot_phases.py
-    outputs/snapshots/<scenario>.png   generate/plot_snapshot.py
-    timings/<scenario>.csv             generate/export_timing.py   (read by Motor/)
+    outputs/gifs/<transition>.gif        generate/animate.py
+    outputs/speeds/<transition>.png      generate/plot_speeds.py
+    outputs/phases/<transition>.png      generate/plot_phases.py
+    outputs/snapshots/<transition>.png   generate/plot_snapshot.py
+    timings/<transition>.csv             generate/export_timing.py   (read by Motor/)
 
 The checks (checks/) are run separately.
 
 Each step runs as its own process; the first solves every transition (or
 loads it from .cache/) and the rest reuse the cache.  A step fails when its
-script exits non-zero — generate/animate.py does when its check finds a problem — and
-the build exits non-zero if any step failed.
+script exits non-zero — generate/animate.py does when its check finds a problem, and
+generate/export_timing.py then writes no timing file for that transition — and the
+build exits non-zero if any step failed.
 """
 
 import subprocess
@@ -26,7 +27,7 @@ import sys
 import time
 
 from core.engine.cli import TRAJ_SOLVER_DIR, parse_args
-from core.scenarios import SCENARIOS
+from core.transitions import TRANSITIONS
 
 
 def run(label, script, args):
@@ -46,7 +47,7 @@ def main():
     names, args = parse_args(__doc__, [(("--no-render",), dict(
         action="store_true", help="skip the GIFs (animate.py still solves and checks)"))])
     render = [] if not args.no_render else ["--no-render"]
-    everything = "all" if names == list(SCENARIOS) else " ".join(names)
+    everything = "all" if names == list(TRANSITIONS) else " ".join(names)
     # The animation and speed plots one transition at a time (so a failure names
     # it), then the steps that take every transition in one call.
     steps = ([(f"animate             {n}", "generate/animate.py", [n, *render]) for n in names]

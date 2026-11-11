@@ -27,7 +27,8 @@ export_timing.py writes the timing files in each motor's own convention:
 The ratios are known: each chain joint is driven through a 30:1 worm gear,
 and each arm A wheel directly.  Arm B wheels have no motor (they spin
 freely), so they are None and the timing files carry no column for them.
-Offsets and signs are pass-throughs (0, +1) until measured on the robot.
+The joints' offsets and signs are pass-throughs (0, +1) until measured on the
+robot; the wheels' signs have been measured.
 After changing this file, run export_timing.py again (the solve itself is
 cached and does not depend on it).
 """
@@ -70,7 +71,7 @@ JOINTS = {
     "q4": Motor(ratio=JOINT_WORM_RATIO),
 }
 
-# The wheels, in the order of planner.WHEELS: arm A and arm B of the front
+# The wheels, in the order of wheels.WHEELS: arm A and arm B of the front
 # and back assemblies.  None = no motor.
 WHEELS = {
     "front_a": Motor(sign=-1),  # measured on the robot: CW (not CCW) when commanded positive

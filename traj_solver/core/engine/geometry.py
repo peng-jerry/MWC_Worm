@@ -15,6 +15,11 @@ segment_distance − r1 − r2.
 import numpy as np
 
 
+def vec(v):
+    """A point or direction as a float array."""
+    return np.asarray(v, dtype=float)
+
+
 def cross(u, v):
     """z-component of the 2-D cross product u × v."""
     return u[..., 0] * v[..., 1] - u[..., 1] * v[..., 0]

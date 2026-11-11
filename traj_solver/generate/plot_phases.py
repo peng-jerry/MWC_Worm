@@ -2,16 +2,16 @@
 plot_phases.py — show each transition at its phase boundaries.
 
 Usage:
-    python generate/plot_phases.py [scenario ...]     default: all (-h for help)
+    python generate/plot_phases.py [transition ...]     default: all (-h for help)
 
 For each transition, draws a panel taken from the solved trajectory for the
 start, then one for the end of each phase (approach, pivot, roll clear, roll
 up, pivot, depart; roll clear and roll up are one "both roll" phase at an
 outside corner or edge — the last panel is the finish).  Phase durations are whole multiples of
-params.SCHEDULE_STEP, so at 3 or 6 fps every boundary is an actual frame — the
+params.SCHEDULE_STEP, so at 3 or 6 per second every boundary is an actual frame — the
 panels show exactly what the animation and export_timing.py contain.
 
-Writes outputs/phases/<scenario>.png.
+Writes outputs/phases/<transition>.png.
 """
 
 import math
@@ -29,7 +29,7 @@ from core.engine.cli import run_each, output_dir, parse_args
 from core.engine.drawing import draw_frame, plot_limits
 from core.engine.kinematics import q_display
 from core.engine.trajectory import solve_trajectory
-from core.scenarios import SCENARIOS
+from core.transitions import TRANSITIONS
 
 OUT_DIR = output_dir("phases")
 
@@ -38,8 +38,8 @@ def plot(name, out_dir=OUT_DIR):
     """Solve transition `name` (or load it from the cache), save the grid of
     phase-boundary panels to out_dir/<name>.png and print each panel's joint
     angles; returns the path."""
-    scn = SCENARIOS[name]
-    traj = solve_trajectory(scn)
+    trn = TRANSITIONS[name]
+    traj = solve_trajectory(trn)
     xlim, ylim = plot_limits(traj)
 
     starts = traj.phase_starts
@@ -55,7 +55,7 @@ def plot(name, out_dir=OUT_DIR):
 
     print(f"\n{name}:")
     for ax, k, label in zip(axes, frames, labels):
-        draw_frame(ax, scn, traj.Q[k], traj.poses[k], xlim, ylim, title="",
+        draw_frame(ax, trn, traj.Q[k], traj.poses[k], xlim, ylim, title="",
                    marker_scale=cell_w / 10.0, show_labels=False)
         if ax.get_legend() is not None:
             ax.get_legend().remove()
@@ -67,7 +67,7 @@ def plot(name, out_dir=OUT_DIR):
     for ax in axes[len(frames):]:
         ax.set_visible(False)
 
-    fig.suptitle(scn.label, fontsize=11)
+    fig.suptitle(trn.label, fontsize=11)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     os.makedirs(out_dir, exist_ok=True)
     out = os.path.join(out_dir, f"{name}.png")

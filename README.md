@@ -1,6 +1,6 @@
 # MWC Worm
 
-A planar robot made of two wheel assemblies joined by a three-link chain, which crosses between surfaces that meet at a corner: from a floor onto a wall, from a wall onto the ceiling, over an exterior corner, and around the end of a thin plate. This repository plans those transitions and plays them on the robot.
+A planar robot made of two wheel assemblies joined by a three-link chain, which crosses between surfaces that meet at a corner: from a floor onto a wall, from a wall onto the ceiling, over an exterior corner, and around the end of a thin plate. It holds onto them by magnetic adhesion. This repository plans those transitions and plays them on the robot.
 
 ```
 Front assembly ── q1 ── l1 ── q2 ── l2 ── q3 ── l3 ── q4 ── Back assembly
@@ -31,15 +31,15 @@ Four joints (q1–q4) connect the two assemblies through three rigid links; each
 | `outside` | top of a block → its exterior wall (outside corner) |
 | `thin_edge` | top of a 3.4 mm plate → its underside |
 
-Each is one entry in `traj_solver/core/scenarios.py`, and adding another takes one more entry ([how](traj_solver/README.md#adding-a-transition)). Durations, phases and the rules every transition follows are in [`traj_solver/README.md`](traj_solver/README.md#transitions).
+Each is one entry in `traj_solver/core/transitions.py`, and adding another takes one more entry ([how](traj_solver/README.md#adding-a-transition)). Durations, phases and the rules every transition follows are in [`traj_solver/README.md`](traj_solver/README.md#transitions).
 
 ## Quick start
 
 On any computer, to solve every transition and write all outputs (Python 3 with numpy, scipy and matplotlib):
 
 ```bash
-pip install numpy scipy matplotlib
 cd traj_solver
+pip install -r requirements.txt
 python build_all.py
 ```
 

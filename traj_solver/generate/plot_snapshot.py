@@ -2,7 +2,7 @@
 plot_snapshot.py — snapshot of one transition, once the leading assembly has rolled clear.
 
 Usage:
-    python generate/plot_snapshot.py [scenario ...]     default: all (-h for help)
+    python generate/plot_snapshot.py [transition ...]     default: all (-h for help)
 
 Solves the transition exactly as animate.py does and draws the
 frame at the end of phase 3, when the leading assembly has rolled clear of
@@ -11,7 +11,7 @@ to it; at an outside corner or edge, where both roll together, it has.
 Joint angles are printed in the calf-up display convention (q1/q4: 0° =
 link straight up from the calf).
 
-Writes outputs/snapshots/<scenario>.png.
+Writes outputs/snapshots/<transition>.png.
 """
 
 import os
@@ -29,7 +29,7 @@ from core.engine.drawing import draw_frame, plot_limits
 from core.engine.kinematics import q_display
 from core.engine.trajectory import solve_trajectory
 from core.robot import l1, l2, l3
-from core.scenarios import SCENARIOS
+from core.transitions import TRANSITIONS
 
 OUT_DIR = output_dir("snapshots")
 
@@ -38,13 +38,13 @@ def plot(name, out_dir=OUT_DIR):
     """Solve transition `name` (or load it from the cache), print the pose and
     joint angles at the end of phase 3 and save that frame to
     out_dir/<name>.png; returns the path."""
-    scn = SCENARIOS[name]
-    traj = solve_trajectory(scn)
+    trn = TRANSITIONS[name]
+    traj = solve_trajectory(trn)
 
     # The frame at the end of phase 3 (leading assembly rolled clear).
     k = int(np.argmin(np.abs(traj.times - traj.phase_starts[3])))
     q, info, p = traj.Q[k], traj.infos[k], traj.poses[k]
-    label = f"{scn.label} — t = {traj.times[k]:.1f} s of {traj.times[-1]:.1f} s (after {traj.phases[2].name})"
+    label = f"{trn.label} — t = {traj.times[k]:.1f} s of {traj.times[-1]:.1f} s (after {traj.phases[2].name})"
 
     print("=" * 60)
     print(f"  Snapshot: {label}")
@@ -60,7 +60,7 @@ def plot(name, out_dir=OUT_DIR):
 
     xlim, ylim = plot_limits(traj)
     fig, ax = plt.subplots(figsize=(9, 7))
-    draw_frame(ax, scn, q, p, xlim, ylim, title=label)
+    draw_frame(ax, trn, q, p, xlim, ylim, title=label)
     ax.grid(True, alpha=0.3, linestyle="--")
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")

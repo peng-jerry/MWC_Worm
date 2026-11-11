@@ -34,7 +34,7 @@ What can touch what (from the robot's construction)
     the assembly's parts never changes and says nothing about the motion.
   * The two assemblies collide with each other and with the surfaces.
     Both assemblies are placed by the motion plan, so that is checked
-    there (planner.check_assemblies), not per configuration.
+    there (placement.check_assemblies), not per configuration.
   * Parts on opposite faces of a plate cannot reach each other through it:
     their gap is measured around the plate (environment.separation).
 

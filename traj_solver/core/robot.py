@@ -78,14 +78,7 @@ class WheelGeometry:
     arm_a2: float =  ARM_A_OFFSET    # back assembly,  arm A (~+17.8°, outboard at θ=0)
     arm_b2: float = -ARM_B_OFFSET    # back assembly,  arm B (−45°, inboard at θ=0)
     calf:   float = CALF_LEN         # strut from chain joint to V-apex (perpendicular to theta)
-    bar_len_a: float = BAR_LEN_A     # arm A length; pass None to auto-derive from bar_len/arm_b1/arm_a1
-
-    def __post_init__(self):
-        if self.bar_len_a is None:
-            # arm_a length that puts the arm_a wheel at the same surface height as
-            # arm_b at theta=0 (equal y-projection → simultaneous floor contact):
-            #   bar_len_a * cos(arm_a1) = bar_len * cos(arm_b1)
-            self.bar_len_a = self.bar_len * abs(np.cos(self.arm_b1)) / abs(np.cos(self.arm_a1))
+    bar_len_a: float = BAR_LEN_A     # arm A length from V-apex to wheel centre
 
 
 # The arms can be rotated, so each kind of transition uses the layout that suits it.

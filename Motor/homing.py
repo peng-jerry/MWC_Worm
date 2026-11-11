@@ -45,6 +45,7 @@ from pybear import Manager
 _TRAJ_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "traj_solver", "core")
 sys.path.insert(0, _TRAJ_DIR)
 from motor_calibration import JOINTS
+from motor_limits import MAX_JOINT_SPEED, POS_LIMIT_MOTOR
 CAL = [JOINTS[f"q{j}"] for j in range(1, 5)]      # q1 → q4
 
 # ── Hardware config ───────────────────────────────────────────────────────────
@@ -56,20 +57,14 @@ BAUDRATE   = 8_000_000
 MOTOR_IDS  = [3, 4, 5, 6]
 
 # ── Motion limits ─────────────────────────────────────────────────────────────
-HOMING_JOINT_SPEED = math.radians(10.8)   # rad/s at the joint (half the 21.6 °/s limit)
+HOMING_JOINT_SPEED = MAX_JOINT_SPEED / 2  # rad/s at the joint (half the 21.6 °/s limit)
 IQ_MAX         = 1.5    # A — torque cap during homing
 STEP_DT        = 0.05   # s — command update interval
-
-# Joints travel ±95° from their zero (±49.74 rad at the motor after the 30:1 worm).
-# The BEAR silently ignores position-limit writes above ~50 rad (measured on
-# this hardware), so 49.9 rad is the largest safe ceiling.
-POS_LIMIT_MOTOR = 49.9
 
 # Speed and acceleration caps at the motor, set every run: the motor otherwise
 # keeps whatever the last script left (xbox_live.py sets BEAR 3's velocity cap
 # to 4.0 rad/s).
-VEL_MAX_MOTOR = math.radians(21.6) * CAL[0].ratio   # 11.3 rad/s: the 21.6 °/s joint limit
-                                                     # (traj_solver/core/params.py MAX_JOINT_SPEED)
+VEL_MAX_MOTOR = MAX_JOINT_SPEED * CAL[0].ratio   # 11.3 rad/s: the 21.6 °/s joint limit
 ACC_MAX_MOTOR = 20.0    # rad/s² — the ramp below starts at full homing speed; this eases
                         # the motor up to it in ~0.3 s (playback.py allows more)
 
@@ -97,7 +92,7 @@ _TIMINGS_DIR = os.path.join(
 )
 
 # Every transition with a timing file: traj_solver/generate/export_timing.py writes one for
-# each entry of traj_solver/core/scenarios.py, so a new transition needs no change here.
+# each entry of traj_solver/core/transitions.py, so a new transition needs no change here.
 SCENARIO_NAMES = sorted(os.path.splitext(f)[0] for f in os.listdir(_TIMINGS_DIR) if f.endswith(".csv"))
 
 

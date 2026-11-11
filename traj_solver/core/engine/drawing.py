@@ -27,25 +27,25 @@ _WG = WheelGeometry()   # default (measured) assembly geometry
 def plot_limits(traj, margin=0.15):
     """
     Axis limits that contain the chain and wheels in every frame, plus a
-    margin.  A side fixed by the scenario's xlim / ylim replaces the fitted one.
+    margin.  A side fixed by the transition's xlim / ylim replaces the fitted one.
     """
-    scn = traj.scenario
-    pts = [np.asarray(scn.approach.origin, dtype=float), np.asarray(scn.depart.origin, dtype=float)]
+    trn = traj.transition
+    pts = [np.asarray(trn.approach.origin, dtype=float), np.asarray(trn.depart.origin, dtype=float)]
     for q, _, p in traj:
         chain, _ = forward_kinematics(q, p["x1"], p["y1"], p["theta1"], l1, l2, l3)
         pts.extend(chain)
-        pts.extend(wheel_centers(p["x1"], p["y1"], p["theta1"], scn.wg, side=1))
-        pts.extend(wheel_centers(p["x2"], p["y2"], p["theta2"], scn.wg, side=-1))
+        pts.extend(wheel_centers(p["x1"], p["y1"], p["theta1"], trn.wg, side=1))
+        pts.extend(wheel_centers(p["x2"], p["y2"], p["theta2"], trn.wg, side=-1))
     pts = np.array(pts)
     lo, hi = pts.min(axis=0) - margin, pts.max(axis=0) + margin
     return tuple(tuple(fit if fixed is None else fixed for fit, fixed in zip((lo[i], hi[i]), lim))
-                 for i, lim in enumerate((scn.xlim, scn.ylim)))
+                 for i, lim in enumerate((trn.xlim, trn.ylim)))
 
 
-def draw_surfaces(ax, scn, xlim, ylim, marker_scale=1.0):
-    """Draw the solid around the transition (planner.Scenario.env), filled,
+def draw_surfaces(ax, trn, xlim, ylim):
+    """Draw the solid around the transition (transition.Transition.env), filled,
     with its faces outlined."""
-    env = scn.env
+    env = trn.env
     for k, poly in enumerate(env.solid_polygons(xlim, ylim)):
         # Opaque, so the pieces of an inside corner's solid overlap invisibly.
         ax.add_patch(Polygon(np.array(poly), closed=True, facecolor="#e4e4e4", edgecolor="none",
@@ -65,25 +65,25 @@ def _capsule_outline(a, b, r, n=24):
                       b + r * np.stack([np.cos(t2), np.sin(t2)], axis=1)])
 
 
-def draw_outline(ax, scn, q, p, marker_scale=1.0):
+def draw_outline(ax, trn, q, p, marker_scale=1.0):
     """Draw the robot's physical outline (constraints.py) — the shapes the
     clearance rules are checked against — as thin outlines."""
     chain, _ = forward_kinematics(q, p["x1"], p["y1"], p["theta1"], l1, l2, l3)
     shapes = [(chain[i], chain[i + 1], JOINT_RADIUS, "steelblue") for i in range(3)]
     for x, y, theta, side, color in ((p["x1"], p["y1"], p["theta1"], +1, "forestgreen"),
                                      (p["x2"], p["y2"], p["theta2"], -1, "crimson")):
-        shapes += [(a, b, r, color) for a, b, r in assembly_parts(x, y, theta, scn.wg, side).values()]
+        shapes += [(a, b, r, color) for a, b, r in assembly_parts(x, y, theta, trn.wg, side).values()]
     for a, b, r, color in shapes:
         ax.add_patch(Polygon(_capsule_outline(np.asarray(a), np.asarray(b), r), closed=True,
                              fill=False, edgecolor=color, lw=0.6 * marker_scale, alpha=0.6, zorder=2))
 
 
-def draw_frame(ax, scn, q, p, xlim, ylim, title=None, marker_scale=1.0, show_labels=True):
-    """Draw one state of transition `scn` — joint angles q, assembly pose p:
+def draw_frame(ax, trn, q, p, xlim, ylim, title=None, marker_scale=1.0, show_labels=True):
+    """Draw one state of transition `trn` — joint angles q, assembly pose p:
     environment, chain and both assemblies, with their physical outline."""
-    draw_surfaces(ax, scn, xlim, ylim, marker_scale)
-    draw_outline(ax, scn, q, p, marker_scale)
-    plot_robot(ax, q, p, scn.wg, title=title, marker_scale=marker_scale, show_labels=show_labels)
+    draw_surfaces(ax, trn, xlim, ylim)
+    draw_outline(ax, trn, q, p, marker_scale)
+    plot_robot(ax, q, p, trn.wg, title=title, marker_scale=marker_scale, show_labels=show_labels)
     ax.set_xlim(xlim)
     ax.set_ylim(ylim)
     ax.set_aspect("equal")
@@ -101,7 +101,7 @@ def plot_robot(ax, q, pose, wg=_WG, title=None, marker_scale=1.0, show_labels=Tr
     pose          places the front assembly: pose["x1"], pose["y1"],
                   pose["theta1"].  The back assembly is drawn where the
                   chain ends, so a q that does not close the chain shows it.
-    wg            the wheel assembly geometry (constraints.WheelGeometry)
+    wg            the wheel assembly geometry (robot.WheelGeometry)
     title         None gives a default title listing the joint angles
     marker_scale  scales line widths and markers (small panels use < 1)
     show_labels   label each joint with its angle (display convention) and

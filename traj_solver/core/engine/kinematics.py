@@ -71,6 +71,9 @@ def forward_kinematics(q, x1, y1, theta1, l1, l2, l3):
     return np.stack([p0, p1, p2, p3]), theta_end
 
 
+_DISPLAY_SHIFT = np.array([-np.pi / 2, 0.0, 0.0, -np.pi / 2])
+
+
 def q_display(q):
     """
     Convert internal solver q to display convention:
@@ -79,5 +82,10 @@ def q_display(q):
       q2, q3 unchanged.
     Result is wrapped to [-π, π).  q is one joint vector (4,) or many (K, 4).
     """
-    shift = np.array([-np.pi / 2, 0.0, 0.0, -np.pi / 2])
-    return wrap(np.asarray(q, dtype=float) + shift)
+    return wrap(np.asarray(q, dtype=float) + _DISPLAY_SHIFT)
+
+
+def q_from_display(q):
+    """The inverse of q_display: solver joint angles from display ones.  Not
+    wrapped, so angles followed past ±π stay continuous."""
+    return np.asarray(q, dtype=float) - _DISPLAY_SHIFT

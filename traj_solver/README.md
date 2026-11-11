@@ -7,11 +7,86 @@ Part of [MWC Worm](../README.md).  For each transition, this folder plans how bo
 Needs Python 3 with numpy, scipy and matplotlib (developed on Python 3.12, numpy 2.4, scipy 1.17, matplotlib 3.10). ffmpeg is optional: with it the animations are MP4, without it GIF.
 
 ```bash
-pip install numpy scipy matplotlib
+pip install -r requirements.txt
 python build_all.py          # solve all four transitions, check them, write every output
 ```
 
-The first run solves every transition (a few minutes; the exterior ones take longest) and caches the results in `.cache/`; later runs reuse them until the solver code changes. Start reading at [Architecture](#architecture): `build_all.py` and the scripts in `generate/` and `checks/` are what you run, and `core/` is the library they share. To change the robot, a setting or a transition, edit the files in `core/` ([Parameters](#parameters), [Adding a transition](#adding-a-transition)); the code in `core/engine/` reads everything from them.
+The first run solves every transition (a few minutes; the exterior ones take longest) and caches the results in `.cache/`; later runs reuse them until the solver code changes. [Status](#status) says what works today and [Architecture](#architecture) is the map of this folder: `build_all.py` and the scripts in `generate/` and `checks/` are what you run, and `core/` is the library they share. To change the robot, a setting or a transition, edit the files in `core/` ([Parameters](#parameters), [Adding a transition](#adding-a-transition)); the code in `core/engine/` reads everything from them.
+
+## Status
+
+What is true today (2026-11-06); update this when it changes.
+
+| Transition | Solves and passes its checks | Preflight (`checks/preflight.py`) | Played on the robot |
+|------------|------------------------------|-----------------------------------|---------------------|
+| `floor_to_wall` | yes | GO | not yet |
+| `wall_to_ceiling` | yes | GO | not yet |
+| `outside` | yes | GO | not yet |
+| `thin_edge` | yes | **NO-GO**: joint positions outside the motors' window | not yet |
+
+Known issues:
+
+- **`thin_edge` goes past the motors' position window.** q2 and q3 reach −103.3° and q1 and q4 −96.5°, against ±95.3° (±49.9 rad at the motor, `POS_LIMIT_MOTOR` in `../Motor/playback.py`). Planning cannot fix this: with the assemblies directly opposite each other across the plate, their chain joints are 0.407 m apart, which needs elbows of at least 101.06°.
+- **The joint limit is stated two ways.** `core/params.py` calls ±110° the physical stop, and `../Motor/xbox_live.py` says the joints travel ±95°. If ±95° is only the motors' limit, shifting the joint zeros would fit `thin_edge`; if it is mechanical, `thin_edge` needs a hardware change. This is parked while the robot is in testing.
+- **The plan is geometry only.** It has no gravity, magnetic adhesion or joint torque, so passing every check does not show that a pose holds on a wall or ceiling.
+
+## Architecture
+
+```
+traj_solver/   (this folder)
+  build_all.py           regenerates every output (runs the scripts in generate/); start here
+  requirements.txt       the Python packages, at the versions last verified
+
+  generate/              the scripts that write the outputs, one kind each
+    animate.py           solve + built-in check + GIF/MP4  → outputs/gifs/
+    plot_speeds.py       wheel speed / joint angle / joint speed plots  → outputs/speeds/
+    plot_phases.py       pose at every phase boundary  → outputs/phases/
+    plot_snapshot.py     one frame, end of phase 3  → outputs/snapshots/
+    export_timing.py     waypoint files for the robot  → timings/
+  checks/                the checks, each printing a report
+    preflight.py         go/no-go: may each timing file be played on the robot?
+    check_constraints.py hand-worked checks of geometry, rules, definitions and plans
+    check_ik.py          joint-angle quality report against ik_baseline.npz (beside it)
+    check_playback.py    simulates Motor/playback.py and measures between waypoints
+
+  core/                  the library — imported by the scripts, never run directly
+    robot.py             EDIT: every dimension of the robot (links, wheel assemblies,
+                         arm layouts, part sizes)
+    params.py            EDIT: every setting you tune (sampling, speeds, limits, the
+                         shared motion plan, the solver's weights and search)
+    transitions.py         EDIT: the transitions, and how to add one
+    motor_calibration.py EDIT: each motor's zero offset, direction sign and gear ratio
+                         (also read by Motor/)
+    motor_limits.py      EDIT: the motors' speed and position limits and update rate
+                         (also read by Motor/)
+    engine/              the implementation; reads everything from the five files above.
+                         Each module imports only from them and from the ones above it
+      hermite.py         the curve the robot plays between waypoints (also read by Motor/)
+      geometry.py        2-D segment and capsule distance tests
+      environment.py     the solid around a transition: clearance, distance through free space
+      kinematics.py      forward kinematics, display convention, angle wrapping
+      constraints.py     wheel positions, the robot's outline as capsules, hard and soft rules (evaluate)
+      chain_ik.py        closed-form chain closure for given q1 values (one frame)
+      transition.py      the Transition each entry of transitions.py is: which assembly
+                         leads, whether its partner follows, the checks on a definition
+      placement.py       where an assembly goes: resting, pivoting or at a set gap; pose checks
+      planner.py         a transition's motion plan: phases, easing, poses, cruise posture
+      follow_gap.py      the gap the partner keeps at an outside corner or edge
+      wheels.py          wheel contact and wheel speeds, from the plan
+      trajectory_ik.py   joint angles for a whole transition by dynamic programming
+      trajectory.py      solve_trajectory: sampling, cruise-posture pins, retiming, cache
+      drawing.py         matplotlib drawing of a transition and the robot
+      cli.py             what the scripts share: transition names on the command line
+                         (and --help), where outputs and timing files go
+      solve_check.py     what a playback on the robot would hit, for a solved transition
+      timing_file.py     a timing file's columns: computed for export_timing.py, read
+                         back by the checks, and whether a file is the current solve's
+      playback_sim.py    a timing file played the way Motor/playback.py plays it
+
+  outputs/               generated figures (gifs/, speeds/, phases/, snapshots/)
+  timings/               timing files for the robot
+  .cache/                solved transitions (gitignored; delete any time)
+```
 
 ## Robot
 
@@ -21,7 +96,7 @@ Front assembly (P0, θ₁)
                                        Back assembly (P3, θ₂)
 ```
 
-Four joints (q1–q4) connect the two wheel assemblies through three rigid links. Placing both assemblies fixes where the chain must end (x₂, y₂, θ₂), which leaves one free degree of freedom: for any q1, q2–q4 follow in closed form. The solver chooses q1 for every frame of a transition together (see [Solver](#solver)).
+The robot holds onto walls and ceilings by magnetic adhesion, which the solver does not model. Four joints (q1–q4) connect the two wheel assemblies through three rigid links. Placing both assemblies fixes where the chain must end (x₂, y₂, θ₂), which leaves one free degree of freedom: for any q1, q2–q4 follow in closed form. The solver chooses q1 for every frame of a transition together (see [Solver](#solver)).
 
 Each assembly is a V: a calf runs from the chain joint down to the V-apex, and two arms run from the apex to the wheels.
 
@@ -68,7 +143,9 @@ All angles in the timing files, graphs, animations and reports use the display c
 
 **Gap** — the straight-line distance between the two chain joints, P0 and P3, measured through space (across a plate too, not along the surface). It sets how much the 0.983 m chain has to arch: on flat ground the cruise gap of 0.786 m (0.8 chain lengths) gives q = (−36°, −54°, −54°, −36°).
 
-**Wheel speeds** — counter-clockwise positive in the side view. A rolling wheel turns at ω = (ẑ × n)·v / r, for its centre's velocity v and the direction n from the contact (a face or a corner) to its centre. The motor speed is that minus the assembly's own turn rate, which is what the motor turns at: a wheel hinging over a corner with its assembly reads 0. A wheel wedged into an inside corner reads 0; a wheel in the air is ramped between the speeds of its contacts before and after.
+**Frame and waypoint** — the same instant seen from two sides: the solver calls each sampled instant a frame, and in a timing file it is a waypoint (one row).
+
+**Wheel speeds** — counter-clockwise positive in the side view. A rolling wheel turns at ω = (ẑ × n)·v / r, for its centre's velocity v and the direction n from the contact (a face or a corner) to its centre. The motor speed is that minus the assembly's own turn rate, which is what the motor turns at: a wheel hinging over a corner with its assembly reads 0. A wheel counts as touching a face only while it rolls along it, not while it is still arriving at it or leaving it. A wheel wedged into an inside corner reads 0; a wheel in the air is ramped between the speeds of its contacts before and after.
 
 ## Transitions
 
@@ -102,7 +179,7 @@ All four transitions follow the same requirements; nothing is tuned per transiti
 | Phases 3 and 4 | **one after the other** (leading first), so the chain does not fold up into the corner; at a corner wider than a right angle, where that would stretch the chain out of reach, they roll together instead | **one phase, "both roll"**: both roll at once, so the chain does not stretch over the edge |
 | Number of phases | 6 | 5 |
 
-The **follow gap** is chosen per exterior transition (`planner.follow_gap`): gaps up to the cruise gap (0.786 m) are searched on a 5 mm grid (every 20 mm first, then finer around the best), each as a complete plan, and scored by the smallest peak joint angle any valid configuration can achieve over all its poses. Each gap is judged by its worst score within ±10 mm, since the robot will not hold the gap exactly.
+The **follow gap** is chosen per exterior transition (`core/engine/follow_gap.py`): gaps up to the cruise gap (0.786 m) are searched on a 5 mm grid (every 20 mm first, then finer around the best), each as a complete plan, and scored by the smallest peak joint angle any valid configuration can achieve over all its poses. Each gap is judged by its worst score within ±10 mm, since the robot will not hold the gap exactly.
 
 **The four transitions**
 
@@ -117,7 +194,7 @@ Durations and peaks are from the solve at 6 waypoints/s; `python generate/animat
 
 ## Adding a transition
 
-The transitions are the entries of `SCENARIOS` in `core/scenarios.py`; that file's docstring is the step-by-step guide, and it ends with a commented-out template (`wall_to_floor`, the reverse of floor-to-wall, which was tried and solves). In short:
+The transitions are the entries of `TRANSITIONS` in `core/transitions.py`; that file's docstring is the step-by-step guide, and it ends with a commented-out template (`wall_to_floor`, the reverse of floor-to-wall, which was tried and solves). In short:
 
 1. Copy the closest existing entry under a new key (`name` must match it; output files are named after it).
 2. Give its two surfaces: `approach` (arrived on) and `depart` (left on), each as `Surface(origin, tangent, normal)`: `origin` where the surface ends at the transition, `tangent` along the surface away from the transition, `normal` into free space.
@@ -128,7 +205,7 @@ Nothing else changes: every script, plot and check, and `../Motor/homing.py` / `
 
 ## Rules
 
-Every configuration is checked against the robot's outline (`core/engine/constraints.py`), the plan against the surfaces (`core/engine/planner.py`).
+Every configuration is checked against the robot's outline (`core/engine/constraints.py`), the plan against the surfaces (`core/engine/placement.py`).
 
 | | Rule |
 |---|------|
@@ -138,6 +215,7 @@ Every configuration is checked against the robot's outline (`core/engine/constra
 | | q2, q3 ≤ 0: the chain arches away from the surface |
 | | the gap within the chain's span, 0.335 – 0.983 m |
 | | no joint steps faster than 21°/s from one waypoint to the next |
+| | a driven (arm A) wheel stays on the solid whenever its assembly moves or turns |
 | **Soft** (in this order) | keep 35 mm of clearance and joints within ±90° |
 | | smooth joint motion |
 | | near-neutral posture (tie-breaker) |
@@ -153,12 +231,12 @@ All of the solver lives in `core/engine/`; everything it reads that you might ch
    - per step between frames: joint speed², and a very large cost for exceeding 21°/s.
 
    The search runs on a 1° q1 grid, then narrows to 0.01°. The first and last frames are pinned to the cruise posture. Because all frames are chosen together, the solver can start a move early to stay within the speed limit.
-4. **Retime** (`core/engine/trajectory.py`): if a joint, on the curve the robot plays, exceeds 21°/s in a phase, that phase is lengthened in proportion and the transition solved again (at most 5 times).
+4. **Retime** (`core/engine/trajectory.py`): if a joint, on the curve the robot plays, exceeds 21°/s in a phase, that phase is lengthened in proportion and the transition solved again. After 5 slow-downs it stops with an error.
 5. **Cache**: each solved transition is saved in `.cache/`, keyed on the source of every solver module, the sample rate and the numpy/scipy versions, so a stale result is never reused. `TRAJ_NO_CACHE=1` forces a fresh solve.
 
 ## Usage
 
-Every script takes any number of transition names from `core/scenarios.py` (`floor_to_wall`, `wall_to_ceiling`, `outside`, `thin_edge`), or `all`, and does every transition when given none; `-h` / `--help` prints its usage. `check_constraints.py` always checks every transition.
+Every script takes any number of transition names from `core/transitions.py` (`floor_to_wall`, `wall_to_ceiling`, `outside`, `thin_edge`), or `all`, and does every transition when given none; `-h` / `--help` prints its usage. `check_constraints.py` always checks every transition.
 
 ```bash
 # Regenerate every output (everything in outputs/, plus timings/):
@@ -183,7 +261,8 @@ python generate/plot_snapshot.py outside
 python generate/export_timing.py
 
 # Play the timing files as Motor/playback.py does (100 Hz) and measure the motion
-# between waypoints: chain gap, clearance, joint/wheel speed and acceleration:
+# between waypoints: chain gap, clearance, joint/wheel speed and acceleration, and
+# how far the wheel commands, as sent, add up to away from the plan:
 python checks/check_playback.py                # from timings/*.csv
 python checks/check_playback.py --rate 12      # solve at 12 waypoints/s instead (writes no files)
 
@@ -194,11 +273,17 @@ python checks/check_ik.py --save-baseline      # accept the current solution as 
 # Checks of the geometry, rules and plans against hand-worked cases:
 python checks/check_constraints.py
 
+# Go/no-go before a timing file goes to the robot: the file is current, the solve
+# passes its check, and the played curves stay within every motor limit:
+python checks/preflight.py
+
 # Another sample rate for one run:
 TRAJ_SAMPLE_RATE=3 python checks/check_ik.py
 ```
 
-`animate.py`'s check reports, per frame, any broken hard rule (HARD), joint past the hard limit (LIMIT), elbow bent the wrong way (SIGN), joint step faster than the motor limit (JUMP) or wheel rolling faster than the rolling limit (OMEGA), and exits non-zero if there is any, so `build_all.py` marks that step failed. Joints past the 90° soft limit are allowed and only summarised, one line per joint (SOFT). `check_constraints.py` exits non-zero if a check fails.
+`animate.py`'s check reports, per frame, any broken hard rule (HARD), joint past the hard limit (LIMIT), elbow bent the wrong way (SIGN), joint step faster than the motor limit (JUMP) or wheel rolling faster than the rolling limit (OMEGA) or driven wheel off the solid while its assembly moves (DRIVE), and exits non-zero if there is any, so `build_all.py` marks that step failed. `export_timing.py` runs the same check (`core/engine/solve_check.py`) and writes no timing file for a transition that fails it. Joints past the 90° soft limit are allowed and only summarised, one line per joint (SOFT).
+
+Every check exits non-zero when it fails: `preflight.py` when any transition is NO-GO, `check_constraints.py` on a failed check, `check_playback.py` on a broken hard rule, a joint over the motors' speed limit, a wheel's travel more than 2 mm off the plan or a missing or out-of-date timing file, and `check_ik.py` on a broken hard rule, a joint step at the motor limit or a baseline that shares no samples. After accepting a change to the motion, save a new baseline.
 
 Output files (all relative to this folder, one per transition). Everything in `outputs/` is generated and can be rebuilt with `build_all.py`:
 
@@ -221,7 +306,7 @@ Output files (all relative to this folder, one per transition). Everything in `o
 | `dq1_rad_s` … `dq4_rad_s` | Joint motor speeds at the waypoint (rad/s) |
 | `w_front_a_rad_s`, `w_back_a_rad_s` | Wheel motor speeds (rad/s) of the driven wheels, front and back arm A (arm B wheels spin freely) |
 
-All values are in each motor's own convention, set in `core/motor_calibration.py` (`position = offset + sign × ratio × angle`). The ratios are known — 30 for every chain joint (30:1 worm), 1 for the arm A wheels (direct drive) — so joint columns are motor positions and speeds, 30× the joint angles. Offsets and signs stay pass-throughs (0, +1) until measured on the robot; angles are in the display convention: q1/q4 0 = link straight up from its calf, q2/q3 0 = straight, counter-clockwise positive in the side view. After changing the calibration, re-run `export_timing.py`. `../Motor/homing.py` and `../Motor/playback.py` read the same table to show joint angles and apply tolerances at the joint.
+All values are in each motor's own convention, set in `core/motor_calibration.py` (`position = offset + sign × ratio × angle`). The ratios are known — 30 for every chain joint (30:1 worm), 1 for the arm A wheels (direct drive) — so joint columns are motor positions and speeds, 30× the joint angles. The joints' offsets and signs stay pass-throughs (0, +1) until measured on the robot, and the wheels' signs are measured; angles are in the display convention: q1/q4 0 = link straight up from its calf, q2/q3 0 = straight, counter-clockwise positive in the side view. After changing the calibration, re-run `export_timing.py`. `../Motor/homing.py` and `../Motor/playback.py` read the same table to show joint angles and apply tolerances at the joint.
 
 - **Joint speeds** use the steps on both sides of each waypoint (monotone "PCHIP" rule), so the cubic Hermite curve that `playback.py` follows between waypoints never overshoots a waypoint, and a joint holding still stays still. First and last waypoints have speed 0. The solver's speed check (step 4 of [Solver](#solver)) measures the same curve.
 - **Wheel speeds** are taken from the motion plan at each waypoint's instant and are relative to the wheel's own assembly, which is what its motor turns at. A wheel rolling over a corner with its assembly reads 0; a wheel in the air ramps linearly to its landing speed.
@@ -230,60 +315,14 @@ The files are played on the robot by `../Motor/homing.py` and `../Motor/playback
 
 ## Parameters
 
-Everything you might change is in `core/`: four files, below. Nothing in `core/engine/` needs editing. Changing any of them changes the solve cache's key, so the next run solves again; the motor calibration and the script settings don't need a re-solve.
+Everything you might change is in `core/`: five files, below. Nothing in `core/engine/` needs editing. Changing any of them changes the solve cache's key, so the next run solves again; the motor calibration, the motor limits and the script settings don't need a re-solve.
 
 | File | What it sets |
 |------|--------------|
 | `core/robot.py` | **Robot geometry**, all of it: link lengths `l1`, `l2`, `l3`; the wheel assemblies (`SPINE_HEIGHT`, `WHEELBASE`, `ARM_A_DX`, `ARM_B_ANGLE`, `WHEEL_RADIUS`); the arm layout each kind of transition uses (`wg_inside`, `wg_outside`, `wg_thin_edge`); the outline (`JOINT_RADIUS`, `CALF_RADIUS`, `MOTOR_DEPTH` / `MOTOR_WIDTH` / `MOTOR_HEIGHT`, `ARM_A_RADIUS`, `ARM_B_RADIUS`) |
-| `core/params.py` | **Everything else you tune**: waypoints per second `SAMPLE_RATE` and phase-length rounding `SCHEDULE_STEP`; speeds (the joint limit `MAX_JOINT_SPEED`, the speed planned to `PLAN_JOINT_SPEED`, rolling `SLIDE_SPEED`, pivoting `PIVOT_RATE`) and the ease-in/out time `RAMP_TIME`; limits (joints `JOINT_SOFT_LIMIT_DEG` (90°) / `JOINT_HARD_LIMIT_DEG` (110°), clearance `SOFT_CLEARANCE` (35 mm) / `HARD_CLEARANCE` (15 mm), rounding allowance `FEASIBILITY_TOL`); and the plan every transition shares (`START_DISTANCE`, `END_DISTANCE`, the cruise gap `CRUISE_SEPARATION`, the follow-gap search `FOLLOW_GAP_STEP` / `FOLLOW_GAP_TOLERANCE`); how phases are slowed for the speed limit (`RETIME_TOLERANCE`, `MAX_RETIMES`); and the solver's trade-offs (`MARGIN_WEIGHT`, `SMOOTH_WEIGHT`, `POSTURE_WEIGHT`) and search resolution (`COARSE_GRID`, `BAND_FACTOR`, `WIDE_PASS`, `SHARP_PASS`, …) |
-| `core/scenarios.py` | **The transitions**: each one's surfaces, turn and arm layout (`SCENARIOS`; the leading assembly is worked out from the surfaces), the thin edge's plate `THIN_EDGE_THICKNESS`; see [Adding a transition](#adding-a-transition) |
+| `core/params.py` | **Everything else you tune**: waypoints per second `SAMPLE_RATE` and phase-length rounding `SCHEDULE_STEP`; speeds (the speed planned to `PLAN_JOINT_SPEED`, rolling `ROLL_SPEED`, pivoting `PIVOT_RATE`) and the ease-in/out time `RAMP_TIME`; limits (joints `JOINT_SOFT_LIMIT_DEG` (90°) / `JOINT_HARD_LIMIT_DEG` (110°), clearance `SOFT_CLEARANCE` (35 mm) / `HARD_CLEARANCE` (15 mm), rounding allowance `FEASIBILITY_TOL`); and the plan every transition shares (`START_DISTANCE`, `END_DISTANCE`, the cruise gap `CRUISE_GAP`, the follow-gap search `FOLLOW_GAP_STEP` / `FOLLOW_GAP_TOLERANCE`); how phases are slowed for the speed limit (`RETIME_TOLERANCE`, `MAX_RETIMES`); and the solver's trade-offs (`MARGIN_WEIGHT`, `SMOOTH_WEIGHT`, `POSTURE_WEIGHT`) and search resolution (`COARSE_GRID`, `BAND_FACTOR`, `WIDE_PASS`, `SHARP_PASS`, …) |
+| `core/transitions.py` | **The transitions**: each one's surfaces, turn and arm layout (`TRANSITIONS`; the leading assembly is worked out from the surfaces), the thin edge's plate `THIN_EDGE_THICKNESS`; see [Adding a transition](#adding-a-transition) |
 | `core/motor_calibration.py` | **Motors**: each joint and wheel motor's zero offset, direction and gear ratio (`JOINTS`, `WHEELS`), also read by `../Motor/`; re-run `export_timing.py` after changing it |
-| Scripts | animation speed `GIF_FRAME_MS` / `GIF_FRAME_STEP` (`animate.py`); playback rate `PLAYBACK_HZ` (`check_playback.py`, matching `../Motor/playback.py`) |
+| `core/motor_limits.py` | **Motor limits**: the joint speed limit `MAX_JOINT_SPEED`, the position limit `POS_LIMIT_MOTOR` and the update rate `PLAYBACK_HZ`, also read by `../Motor/` |
+| Scripts | animation speed `GIF_FRAME_MS` / `GIF_FRAME_STEP` (`animate.py`) |
 | Environment | `TRAJ_SAMPLE_RATE=3` overrides `SAMPLE_RATE` for one run; `TRAJ_NO_CACHE=1` forces a fresh solve |
-
-## Architecture
-
-```
-traj_solver/   (this folder)
-  build_all.py           regenerates every output (runs the scripts in generate/); start here
-
-  generate/              the scripts that write the outputs, one kind each
-    animate.py           solve + built-in check + GIF/MP4  → outputs/gifs/
-    plot_speeds.py       wheel speed / joint angle / joint speed plots  → outputs/speeds/
-    plot_phases.py       pose at every phase boundary  → outputs/phases/
-    plot_snapshot.py     one frame, end of phase 3  → outputs/snapshots/
-    export_timing.py     waypoint files for the robot  → timings/
-  checks/                the checks, each printing a report
-    check_constraints.py hand-worked checks of geometry, rules, definitions and plans
-    check_ik.py          joint-angle quality report against ik_baseline.npz (beside it)
-    check_playback.py    simulates Motor/playback.py and measures between waypoints
-
-  core/                  the library — imported by the scripts, never run directly
-    robot.py             EDIT: every dimension of the robot (links, wheel assemblies,
-                         arm layouts, part sizes)
-    params.py            EDIT: every setting you tune (sampling, speeds, limits, the
-                         shared motion plan, the solver's weights and search)
-    scenarios.py         EDIT: the transitions, and how to add one
-    motor_calibration.py EDIT: each motor's zero offset, direction sign and gear ratio
-                         (also read by Motor/)
-    engine/              the implementation; reads everything from the three files above.
-                         Each module imports only from them and from the ones above it
-      geometry.py        2-D segment and capsule distance tests
-      environment.py     the solid around a transition: clearance, distance through free space
-      kinematics.py      forward kinematics, display convention, angle wrapping
-      constraints.py     wheel positions, the robot's outline as capsules, hard and soft rules (evaluate)
-      chain_ik.py        closed-form chain closure for given q1 values (one frame)
-      planner.py         a transition's motion plan: phases, follow gap, plan checks,
-                         cruise posture, wheel speeds; the Scenario a transition is defined by
-      trajectory_ik.py   joint angles for a whole transition by dynamic programming
-      trajectory.py      solve_trajectory: sampling, cruise-posture pins, retiming, cache
-      drawing.py         matplotlib drawing of a transition and the robot
-      cli.py             what the scripts share: transition names on the command line
-                         (and --help), where outputs and timing files go
-      timing_file.py     a timing file's columns: computed for export_timing.py, read
-                         back for check_playback.py
-
-  outputs/               generated figures (gifs/, speeds/, phases/, snapshots/)
-  timings/               timing files for the robot
-  .cache/                solved transitions (gitignored; delete any time)
-```

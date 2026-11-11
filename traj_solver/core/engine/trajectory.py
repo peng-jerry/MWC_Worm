@@ -9,11 +9,11 @@ trajectory.py — solve a transition's joint angles once, and reuse the result.
 
 Cache
 -----
-A solve takes from about 2 s (inside corners) to 20 s (outside corner, thin
-edge) and every script needs the same result, so each solved transition is
-saved in traj_solver/.cache/.  Its key is built from
-  * the transition's definition (every field of its Scenario, so editing an
-    entry in core/scenarios.py counts),
+A solve takes about 8 s (inside corners) to 70 s (outside corner, thin edge,
+most of it choosing the follow gap) and every script needs the same result, so
+each solved transition is saved in traj_solver/.cache/.  Its key is built from
+  * the transition's definition (every field of its Transition, so editing an
+    entry in core/transitions.py counts),
   * the sample rate and the numpy and scipy versions, and
   * the source of this module and of every module of the core package it
     imports, directly or indirectly — in core/engine/ and core/ alike, so
@@ -38,12 +38,14 @@ from typing import Optional
 import numpy as np
 import scipy
 
+from .follow_gap import follow_gap
+from .hermite import hermite_speed
 from .kinematics import q_display
+from .planner import cruise_posture, phase_index, phase_starts, plan_phases, sample_poses
+from .trajectory_ik import solve_trajectory_dp
+from .transition import PlanError, Transition
 from ..params import MAX_RETIMES, PLAN_JOINT_SPEED, RETIME_TOLERANCE, SAMPLE_RATE
 from ..robot import l1, l2, l3
-from .planner import (PlanError, Scenario, plan_phases, phase_starts, sample_poses,
-                        cruise_posture, follow_gap)
-from .trajectory_ik import solve_trajectory_dp
 
 _PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # core/
 _PACKAGE = __name__.split(".")[0]                                           # "core"
@@ -66,13 +68,13 @@ class Trajectory:
     phases   the phases with their final durations
     retimes  how many times phases were slowed down for the joint speed limit
     gap      gap (m) the partner aims to keep while following a pivot, or None when
-             it parks (planner.follow_gap)
+             it parks (follow_gap.py)
     key      the cache key: identifies the code and parameters that made it
     cached   True when it was loaded from the cache instead of solved
 
     Iterating yields (q, info, pose) for each frame.
     """
-    scenario: Scenario
+    transition: Transition
     phases: list
     times: np.ndarray
     poses: list
@@ -95,8 +97,7 @@ class Trajectory:
 
     def phase_at(self, t):
         """Index of the phase running at time t."""
-        return min(int(np.searchsorted(self.phase_starts, t, side="right")) - 1,
-                   len(self.phases) - 1)
+        return phase_index(self.phase_starts, t)
 
     def __len__(self):
         return len(self.times)
@@ -131,12 +132,10 @@ def _phase_peak_speeds(times, Q, phases):
     is faster than the step between the waypoints.  Each segment between two
     waypoints counts toward the phase that contains its midpoint.
     """
-    D = np.unwrap(np.array([q_display(q) for q in Q]), axis=0)
+    D = np.unwrap(q_display(Q), axis=0)
     V = joint_speeds(times, D)
     a = np.linspace(0.0, 1.0, 33)[:, None, None]     # through each segment, finer than 100 Hz
-    # Time derivative of the cubic Hermite (basis derivatives h00', h10', h11').
-    speed = ((6 * a * a - 6 * a) * (D[:-1] - D[1:]) / np.diff(times)[:, None]
-             + (3 * a * a - 4 * a + 1) * V[:-1] + (3 * a * a - 2 * a) * V[1:])
+    speed = hermite_speed(D[:-1], V[:-1], D[1:], V[1:], np.diff(times)[:, None], a)
     speed = np.abs(speed).max(axis=(0, 2))
     mid = 0.5 * (times[1:] + times[:-1])
     starts = phase_starts(phases)
@@ -144,32 +143,36 @@ def _phase_peak_speeds(times, Q, phases):
                      for i in range(len(phases))])
 
 
-def _solve(scn, rate):
+def _solve(trn, rate):
     """The solve itself (see solve_trajectory).  Raises PlanError if the
-    transition cannot be planned or no joint angles connect its frames."""
-    gap = follow_gap(scn, rate) if scn.partner_follows else None
+    transition cannot be planned, no joint angles connect its frames, or the
+    joints are still too fast after MAX_RETIMES slow-downs."""
+    gap = follow_gap(trn, rate) if trn.partner_follows else None
     min_durations = None
     for retimes in range(MAX_RETIMES + 1):
-        phases = plan_phases(scn, min_durations, gap)
-        times, poses = sample_poses(scn, phases, rate)
+        phases = plan_phases(trn, min_durations, gap)
+        times, poses = sample_poses(trn, phases, rate)
         frame_rate = (len(times) - 1) / times[-1]
         try:
             Q, infos = solve_trajectory_dp(
-                poses, scn.env, scn.wg, l1, l2, l3,
+                poses, trn.env, trn.wg, l1, l2, l3,
                 dt=1.0 / frame_rate,
                 max_step=PLAN_JOINT_SPEED / frame_rate,
-                q_start=cruise_posture(scn, poses[0]),
-                q_end=cruise_posture(scn, poses[-1]),
+                q_start=cruise_posture(trn, poses[0]),
+                q_end=cruise_posture(trn, poses[-1]),
             )
         except RuntimeError as e:             # no closed chain, or no path through the frames
-            raise PlanError(f"{scn.name}: {e}") from None
+            raise PlanError(f"{trn.name}: {e}") from None
         peaks = _phase_peak_speeds(times, Q, phases)
         too_fast = peaks > PLAN_JOINT_SPEED * (1 + RETIME_TOLERANCE)
-        if not too_fast.any() or retimes == MAX_RETIMES:
-            break
+        if not too_fast.any():
+            return Trajectory(trn, phases, times, poses, Q, infos, retimes, gap)
         min_durations = [p.duration * (pk / PLAN_JOINT_SPEED if fast else 1.0)
                          for p, pk, fast in zip(phases, peaks, too_fast)]
-    return Trajectory(scn, phases, times, poses, Q, infos, retimes, gap)
+    worst = int(np.argmax(peaks))
+    raise PlanError(f"{trn.name}: a joint still reaches {np.degrees(peaks[worst]):.1f}°/s in "
+                    f"\"{phases[worst].name}\" after {MAX_RETIMES} slow-downs (planned limit "
+                    f"{np.degrees(PLAN_JOINT_SPEED):.1f}°/s)")
 
 
 # ------------------------------------------------------------------ #
@@ -220,23 +223,23 @@ def _solver_sources():
     return sources
 
 
-def cache_key(scn, rate=SAMPLE_RATE):
-    """The cache key for transition `scn` sampled at `rate` (see the module docstring)."""
+def cache_key(trn, rate=SAMPLE_RATE):
+    """The cache key for transition `trn` sampled at `rate` (see the module docstring)."""
     h = hashlib.sha256()
-    for part in (repr(scn), repr(float(rate)), np.__version__, scipy.__version__):
+    for part in (repr(trn), repr(float(rate)), np.__version__, scipy.__version__):
         h.update(part.encode() + b"\0")
     for name, src in sorted(_solver_sources().items()):
         h.update(name.encode() + b"\0" + src + b"\0")
     return h.hexdigest()
 
 
-def _cache_path(scn, rate, key):
-    return os.path.join(CACHE_DIR, f"{scn.name}_{float(rate):g}fps_{key[:16]}.pkl")
+def _cache_path(trn, rate, key):
+    return os.path.join(CACHE_DIR, f"{trn.name}_{float(rate):g}fps_{key[:16]}.pkl")
 
 
-def _load(scn, rate, key):
+def _load(trn, rate, key):
     """The cached trajectory, or None if there is none (or it does not rebuild)."""
-    path = _cache_path(scn, rate, key)
+    path = _cache_path(trn, rate, key)
     if not os.path.exists(path):
         return None
     try:
@@ -244,19 +247,19 @@ def _load(scn, rate, key):
             d = pickle.load(fh)
         # Phases hold functions, which are not saved: rebuild them from the
         # saved durations and check they come out the same.
-        phases = plan_phases(scn, d["durations"], d["gap"])
+        phases = plan_phases(trn, d["durations"], d["gap"])
         if not np.allclose([p.duration for p in phases], d["durations"]):
             return None
     except Exception:                        # unreadable or from an older format
         return None
-    return Trajectory(scn, phases, d["times"], d["poses"], d["Q"], d["infos"], d["retimes"],
+    return Trajectory(trn, phases, d["times"], d["poses"], d["Q"], d["infos"], d["retimes"],
                       d["gap"], key, cached=True)
 
 
 def _save(traj, rate):
     """Save a solved trajectory and delete older entries for the same transition and rate."""
     os.makedirs(CACHE_DIR, exist_ok=True)
-    path = _cache_path(traj.scenario, rate, traj.key)
+    path = _cache_path(traj.transition, rate, traj.key)
     stem = os.path.basename(path).rsplit("_", 1)[0] + "_"
     d = {"durations": [p.duration for p in traj.phases], "gap": traj.gap, "times": traj.times,
          "poses": traj.poses, "Q": traj.Q, "infos": traj.infos, "retimes": traj.retimes}
@@ -273,26 +276,27 @@ def _save(traj, rate):
 #  Public API                                                         #
 # ------------------------------------------------------------------ #
 
-def solve_trajectory(scn, rate=SAMPLE_RATE):
+def solve_trajectory(trn, rate=SAMPLE_RATE):
     """
-    Plan the transition `scn`, sample it at `rate` frames per second and solve
+    Plan the transition `trn`, sample it at `rate` frames per second and solve
     every frame's joint angles together, with both ends fixed to the cruise
     posture.  Returns a Trajectory, from the cache when the code and
     parameters are unchanged since it was last solved.
 
     At an outside corner or edge the follow gap is chosen first
-    (planner.follow_gap).  The phases are then timed from the wheel and
+    (follow_gap.py).  The phases are then timed from the wheel and
     pivot speeds alone (planner.plan_phases).  If the solved joints must
     move faster than params.PLAN_JOINT_SPEED in some phase — as the robot
     plays them, between waypoints too — that phase is lengthened in
-    proportion and the trajectory is solved again.
+    proportion and the trajectory is solved again, at most
+    params.MAX_RETIMES times; after that it raises PlanError.
     """
-    key = cache_key(scn, rate)
+    key = cache_key(trn, rate)
     if os.environ.get("TRAJ_NO_CACHE", "") in ("", "0"):
-        traj = _load(scn, rate, key)
+        traj = _load(trn, rate, key)
         if traj is not None:
             return traj
-    traj = _solve(scn, rate)
+    traj = _solve(trn, rate)
     traj.key = key
     _save(traj, rate)
     return traj

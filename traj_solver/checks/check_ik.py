@@ -1,20 +1,24 @@
 """
-check_ik.py — joint-angle quality report for the transition scenarios.
+check_ik.py — joint-angle quality report for the transitions.
 
-Solves each scenario exactly as animate.py does and reports the
+Solves each transition exactly as animate.py does and reports the
 metrics that matter when the joint angles are played back on the motors:
 speed against the joint limit, smoothness, joint-limit and clearance
 margins, and whether every hard rule (constraints.py) holds.
 
 Usage:
-    python checks/check_ik.py [scenario ...]                  default: all (-h for help)
-    python checks/check_ik.py [scenario ...] --save-baseline  also store the joint
+    python checks/check_ik.py [transition ...]                  default: all (-h for help)
+    python checks/check_ik.py [transition ...] --save-baseline  also store the joint
                                                        angles in ik_baseline.npz
 
-Without --save-baseline, each scenario is also compared with the stored
-baseline on the time samples both runs share (so a 6 fps run can be
-compared with a 3 fps baseline).  Save a new baseline whenever you accept
+Without --save-baseline, each transition is also compared with the stored
+baseline on the time samples both runs share (so a run at 6 per second can be
+compared with a baseline at 3).  Save a new baseline whenever you accept
 a change; a change of a phase's length leaves no samples in common.
+
+Exits non-zero if a hard rule breaks, a joint step reaches the motor limit, or
+a transition's baseline shares no samples with it, so that nothing could be
+compared.  --save-baseline only stores transitions that pass.
 
 The sample rate comes from core/params.py; override it per run with e.g.
     TRAJ_SAMPLE_RATE=3 python checks/check_ik.py
@@ -30,11 +34,11 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.engine.cli import run_each, parse_args
 from core.engine.constraints import CLEARANCE_GROUPS
-from core.engine.kinematics import q_display
+from core.engine.kinematics import q_display, wrap
 from core.engine.trajectory import solve_trajectory
-from core.params import (HARD_CLEARANCE, JOINT_HARD_LIMIT_DEG, JOINT_SOFT_LIMIT_DEG, MAX_JOINT_SPEED,
-                         SOFT_CLEARANCE)
-from core.scenarios import SCENARIOS
+from core.motor_limits import MAX_JOINT_SPEED
+from core.params import HARD_CLEARANCE, JOINT_HARD_LIMIT_DEG, JOINT_SOFT_LIMIT_DEG, SOFT_CLEARANCE
+from core.transitions import TRANSITIONS
 
 BASELINE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ik_baseline.npz")   # beside this script
 
@@ -43,10 +47,10 @@ HARD_DEG = JOINT_HARD_LIMIT_DEG
 MOVE_DEG = 0.05    # steps smaller than this count as stationary when counting reversals
 
 
-def solve(scenario):
-    """Solve one scenario; returns (Trajectory, seconds)."""
+def solve(transition):
+    """Solve one transition; returns (Trajectory, seconds)."""
     t0 = time.time()
-    traj = solve_trajectory(SCENARIOS[scenario])
+    traj = solve_trajectory(TRANSITIONS[transition])
     return traj, time.time() - t0
 
 
@@ -54,7 +58,7 @@ def metrics(traj):
     """Quality metrics for one solved trajectory."""
     Q   = traj.Q
     jump_deg = np.degrees(MAX_JOINT_SPEED / traj.rate)       # motor speed limit per frame
-    Dw  = np.degrees(np.array([q_display(q) for q in Q]))   # wrapped, for limit checks
+    Dw  = np.degrees(q_display(Q))                          # wrapped, for limit checks
     D   = np.degrees(np.unwrap(np.radians(Dw), axis=0))     # unwrapped, for rates
     dq  = np.diff(D, axis=0)                                # °/frame
     ddq = np.diff(dq, axis=0)                               # °/frame²
@@ -115,12 +119,13 @@ def _shared_samples(cur, base):
     return None
 
 
-def report(scenario, traj, m, seconds, baseline):
+def report(transition, traj, m, seconds, baseline):
     """Print the metrics m of one solved transition, and its difference from
-    the baseline when there is one for it."""
+    the baseline when there is one for it.  Returns False if it has a baseline
+    that shares no samples with it."""
     n = len(traj)
     phases = ", ".join(f"{p.name} {p.duration:.1f}" for p in traj.phases)
-    print(f"\n=== {scenario}   ({traj.times[-1]:.1f} s, {n} frames at {traj.rate:g} Hz, "
+    print(f"\n=== {transition}   ({traj.times[-1]:.1f} s, {n} frames at {traj.rate:g} Hz, "
           + (f"loaded from cache in {seconds:.1f} s)" if traj.cached else f"solved in {seconds:.1f} s)"))
     print(f"  phases (s)          {phases}"
           + (f"   [{traj.retimes} slow-down(s)]" if traj.retimes else ""))
@@ -139,21 +144,22 @@ def report(scenario, traj, m, seconds, baseline):
     print(f"  hard violations     {len(m['violated'])}/{n} frames{_term_summary(m['violated'])}")
     print(f"  pose infeasible     {len(m['blocked'])}/{n} frames (no configuration meets "
           f"every hard rule){_term_summary(m['blocked'])}")
-    if scenario in baseline:
-        shared = _shared_samples(m["Q"], baseline[scenario])
+    if transition in baseline:
+        shared = _shared_samples(m["Q"], baseline[transition])
         if shared is None:
-            print(f"  vs baseline         no shared time samples ({n} vs {len(baseline[scenario])} frames)")
-        else:
-            cur, base = shared
-            d = np.degrees(np.abs((cur - base + np.pi) % (2 * np.pi) - np.pi))
-            print(f"  vs baseline         max |Δq| {d.max():.2f}°   frames differing > 1°: "
-                  f"{int(np.sum(d.max(axis=1) > 1.0))}/{len(d)} shared samples")
+            print(f"  vs baseline         no shared time samples ({n} vs {len(baseline[transition])} frames)")
+            return False
+        cur, base = shared
+        d = np.degrees(np.abs(wrap(cur - base)))
+        print(f"  vs baseline         max |Δq| {d.max():.2f}°   frames differing > 1°: "
+              f"{int(np.sum(d.max(axis=1) > 1.0))}/{len(d)} shared samples")
+    return True
 
 
 def main():
-    """Report the scenarios named on the command line (default all); with
+    """Report the transitions named on the command line (default all); with
     --save-baseline, store their joint angles as the new baseline."""
-    scenarios, args = parse_args(__doc__, [(("--save-baseline",), dict(
+    transitions, args = parse_args(__doc__, [(("--save-baseline",), dict(
         action="store_true", help="store these joint angles in ik_baseline.npz as the new baseline"))])
     save = args.save_baseline
 
@@ -163,13 +169,16 @@ def main():
     def one(sc):
         traj, seconds = solve(sc)
         m = metrics(traj)
-        report(sc, traj, m, seconds, baseline)
-        stored[sc] = m["Q"]
+        comparable = report(sc, traj, m, seconds, baseline)
+        passed = not m["violated"] and not m["jumps"]
+        if passed:
+            stored[sc] = m["Q"]
+        return passed and comparable
 
-    failed = run_each(scenarios, one)
+    failed = run_each(transitions, one)
     if save:
         np.savez(BASELINE_PATH, **stored)
-        print(f"\nSaved baseline → {BASELINE_PATH}")
+        print(f"\nSaved baseline → {BASELINE_PATH}" + (f" (without {', '.join(failed)})" if failed else ""))
     sys.exit(1 if failed else 0)
 
 

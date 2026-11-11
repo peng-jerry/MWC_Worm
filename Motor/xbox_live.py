@@ -31,9 +31,10 @@ than whatever it last had saved. That is ±96° at q1-q4 after the 30:1 worm,
 but only ~8 turns either way for a wheel, so a wheel driven continuously in
 one direction will eventually fault too.
 
-No motor is soft-limited: ROLE_PARAMS["soft_limit"] (JOINT_LIMIT_MOTOR, which
-would otherwise zero a command that drives q1-q4 past the robot's ±95° joint
-range) is off for every role, same as the wheels. Nothing in software stops
+No motor is soft-limited: ROLE_PARAMS["soft_limit"] (JOINT_LIMIT_MOTOR, from
+traj_solver/core/motor_limits.py, which would otherwise zero a command that
+drives q1-q4 past the robot's ±95° joint range) is off for every role, same as
+the wheels. Nothing in software stops
 q1-q4 from being driven past their physical range — be careful with all
 eight motors.
 
@@ -61,6 +62,10 @@ _PYBEAR_DIR = os.path.join(
 sys.path.insert(0, _PYBEAR_DIR)
 from pybear import Manager
 from diagnostics import STATS, motor_entry, open_window, read_stats
+
+# ── Motor limits (shared with playback.py, homing.py and traj_solver/) ────────
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "traj_solver", "core"))
+from motor_limits import POS_LIMIT_MOTOR as JOINT_LIMIT_MOTOR
 
 try:
     import evdev
@@ -90,8 +95,8 @@ ROLE_TO_ID = {
 }
 
 # q1-q4 travel ±95° from straight up (±49.74 rad at the motor after the 30:1
-# worm). Used only by the (currently disabled) software soft limit.
-JOINT_LIMIT_MOTOR = 49.9
+# worm): JOINT_LIMIT_MOTOR, imported above from motor_limits.py (49.9 rad), used
+# only by the (currently disabled) software soft limit.
 
 # Position limit written to every motor at startup. 16π (50.27 rad) is the
 # largest value the BEAR accepts — anything above it is silently ignored and

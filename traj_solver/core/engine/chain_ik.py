@@ -17,7 +17,7 @@ left free.  This module parametrises that free DOF by q1:
   * Fix q1.  P1 is then known, and links l2 and l3 must reach from P1 to P3:
     a two-link problem solved exactly by the law of cosines.  It has two
     solutions, the elbow branches (sign = +1 gives q3 <= 0, the inward bend
-    every scenario uses).
+    every transition uses).
   * q4 then follows from the orientation, so every (q1, branch) candidate
     closes the chain exactly — there is no kinematic residual to minimise.
 

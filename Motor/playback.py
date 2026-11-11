@@ -77,7 +77,9 @@ from diagnostics import STATS, ERROR_BITS, decode_code, motor_entry, open_window
 # ── Motor calibration (shared with traj_solver/generate/export_timing.py) ─────
 _TRAJ_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "traj_solver", "core")
 sys.path.insert(0, _TRAJ_DIR)
+from engine.hermite import hermite
 from motor_calibration import JOINTS
+from motor_limits import MAX_JOINT_SPEED, PLAYBACK_HZ, POS_LIMIT_MOTOR
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Config — must match homing.py
@@ -92,16 +94,10 @@ SWERVE_IDS = {"front_swerve": 2, "back_swerve": 7}
 NAMES      = {mid: name for ids in (JOINT_IDS, WHEEL_IDS, SWERVE_IDS) for name, mid in ids.items()}
 ALL_IDS    = list(NAMES)
 
-# Joints travel ±95° from their zero (±49.74 rad at the motor after the 30:1
-# worm).  The BEAR silently ignores position-limit writes above ~50 rad
-# (measured on this hardware), so 49.9 rad is the largest safe ceiling.
-POS_LIMIT_MOTOR = 49.9
-
 # Joint speed and acceleration caps at the motor, set every run: a motor
 # otherwise keeps whatever the last script left (xbox_live.py sets its
 # velocity caps to 4.0 rad/s, below what playback needs).
-JOINT_VEL_MAX = {n: math.radians(21.6) * JOINTS[n].ratio for n in JOINT_IDS}   # 11.3 rad/s: the 21.6 °/s
-                                                    # joint limit (traj_solver/core/params.py MAX_JOINT_SPEED)
+JOINT_VEL_MAX = {n: MAX_JOINT_SPEED * JOINTS[n].ratio for n in JOINT_IDS}   # 11.3 rad/s: the 21.6 °/s joint limit
 JOINT_ACC_MAX = 120.0   # rad/s² — about twice the most any timing file needs (61 rad/s²).
                         # Position mode limits acceleration to this; the BEAR default
                         # (5 rad/s²) would make a joint lag ~2 s behind every speed-up.
@@ -118,9 +114,9 @@ SWERVE_VEL_MAX      = 2.0      # rad/s — slow if one is ever pushed off and re
 SWERVE_DRIFT_ABORT  = 0.2      # rad at the motor — a swerve this far off stops playback
 
 # ── Playback timing ───────────────────────────────────────────────────────────
-# Command update rate (Hz).  If the PC cannot send all goals within one
-# update, the late count printed at the end says so — lower it if that is large.
-INTERP_HZ = 100
+# Command update rate (Hz), shared with checks/check_playback.py.  If the PC cannot
+# send all goals within one update, the late count printed at the end says so.
+INTERP_HZ = PLAYBACK_HZ
 DIAG_REFRESH_EVERY_N = max(1, INTERP_HZ // 10)    # updates between diagnostics-window refreshes (10×/sec)
 
 # ── Position PID (joints and swerves) ─────────────────────────────────────────
@@ -152,7 +148,7 @@ _TIMINGS_DIR = os.path.join(
 )
 
 # Every transition with a timing file: traj_solver/generate/export_timing.py writes one for
-# each entry of traj_solver/core/scenarios.py, so a new transition needs no change here.
+# each entry of traj_solver/core/transitions.py, so a new transition needs no change here.
 SCENARIO_NAMES = sorted(os.path.splitext(f)[0] for f in os.listdir(_TIMINGS_DIR) if f.endswith(".csv"))
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -191,17 +187,6 @@ def load_csv(scenario):
             for n in WHEEL_IDS:
                 w[n].append(float(row[f"w_{n}_rad_s"]))
     return times, q, dq, w
-
-def hermite(q_k, dq_k, q_k1, dq_k1, T, alpha):
-    """
-    Cubic Hermite position at normalised time alpha in [0, 1]: the cubic that
-    starts at q_k with speed dq_k and ends T seconds later at q_k1 with speed
-    dq_k1.  Same formula as traj_solver/checks/check_playback.py.
-    """
-    a2, a3 = alpha * alpha, alpha * alpha * alpha
-    h00, h10 = 2 * a3 - 3 * a2 + 1, a3 - 2 * a2 + alpha
-    h01, h11 = -2 * a3 + 3 * a2, a3 - a2
-    return h00 * q_k + h10 * T * dq_k + h01 * q_k1 + h11 * T * dq_k1
 
 def set_mode_confirmed(bear, motor_id, mode, tries=5, delay=0.02):
     for _ in range(tries):
@@ -514,7 +499,7 @@ try:
             bear.set_goal_velocity((mid, 0.0))
         print(f"\n\nPlayback complete — {total:.2f}s of {times[-1]:.2f}s planned  ({n_frames} waypoints)")
     print(f"Late updates: {late} of {tick + 1}"
-          + ("  ← the PC could not keep up; lower INTERP_HZ" if late > 0.01 * (tick + 1) else ""))
+          + ("  ← the PC could not keep up; lower PLAYBACK_HZ" if late > 0.01 * (tick + 1) else ""))
     print("Joint tracking error, max: " + "  ".join(f"{n} {math.degrees(v):.2f}°" for n, v in track_max.items())
           + f"   (readings above {math.degrees(TRACK_WARN):.0f}°: {warned})")
     print("Swerve drift, max: " + "  ".join(f"{n} {v:.3f} rad" for n, v in drift_max.items()))

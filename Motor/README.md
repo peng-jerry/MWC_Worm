@@ -22,7 +22,7 @@ pip install pyserial termcolor evdev
 | 7 | back swerve | position mode, held where it is at the start |
 | 8 | back wheel (arm A) | velocity mode, follows `w_back_a_rad_s` |
 
-The joint motors drive their joints through a 30:1 worm, so a motor turns 30 times as far as its joint; the arm A wheels are driven directly and the arm B wheels spin freely. Each motor's zero offset, direction and gear ratio is in [`../traj_solver/core/motor_calibration.py`](../traj_solver/core/motor_calibration.py), which the solver uses to write the timing files and these scripts use to read them, so the two always agree.
+The joint motors drive their joints through a 30:1 worm, so a motor turns 30 times as far as its joint; the arm A wheels are driven directly and the arm B wheels spin freely. Each motor's zero offset, direction and gear ratio is in [`../traj_solver/core/motor_calibration.py`](../traj_solver/core/motor_calibration.py), which the solver uses to write the timing files and these scripts use to read them, so the two always agree. The speed and position limits and the update rate are in [`../traj_solver/core/motor_limits.py`](../traj_solver/core/motor_limits.py), and the curve played between waypoints in [`../traj_solver/core/engine/hermite.py`](../traj_solver/core/engine/hermite.py), so the solver's checks use the same ones.
 
 ## Playing a transition
 

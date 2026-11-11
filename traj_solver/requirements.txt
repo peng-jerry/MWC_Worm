@@ -1,0 +1,5 @@
+# The versions the solver was last verified with.  Solves are cached per numpy
+# and scipy version, so changing either one solves everything again.
+numpy==2.4.4
+scipy==1.17.1
+matplotlib==3.10.9
